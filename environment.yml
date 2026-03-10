@@ -1,4 +1,4 @@
-name: pointcept-torch2.5.0-cu12.4
+name: pointcept
 channels:
   - pytorch
   - nvidia/label/cuda-12.4.1
@@ -47,6 +47,6 @@ dependencies:
     - peft #for lora finetune
     - git+https://github.com/octree-nn/ocnn-pytorch.git
     - git+https://github.com/openai/CLIP.git
-    - git+https://github.com/Dao-AILab/flash-attention.git
-    - ./libs/pointops
-    - ./libs/pointgroup_ops
+    #- git+https://github.com/Dao-AILab/flash-attention.git
+    #- ./libs/pointops
+    #- ./libs/pointgroup_ops
