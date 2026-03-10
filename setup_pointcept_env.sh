@@ -14,4 +14,9 @@ pip install --no-build-isolation ./libs/pointops
 pip install --no-build-isolation ./libs/pointgroup_ops
 pip install --no-build-isolation flash-attn==2.7.4.post1
 
+# 3DETR dependencies
+pip install --no-build-isolation ./third_party/3detr/third_party/pointnet2
+pip install trimesh opencv-python cython
+(cd third_party/3detr/utils && python cython_compile.py build_ext --inplace)
+
 echo "==> Done! Activate with: conda activate ${ENV_NAME}"
