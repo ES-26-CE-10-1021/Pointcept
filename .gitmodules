@@ -1,0 +1,4 @@
+[submodule "third_party/3detr"]
+	path = third_party/3detr
+	url = git@github.com:ES-26-CE-10-1021/3detr.git
+	branch = dev

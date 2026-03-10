@@ -1,0 +1,17 @@
+# Clone the repo
+git clone --branch dev --recursive git@github.com:ES-26-CE-10-1021/Pointcept.git
+
+# Initialize submodules
+git submodule update --init --recursive
+
+# Pull latest update for all submodules
+git submodule update --remote
+
+# Pull latest update for a submodule
+git submodule update --remote third_party/<repo_name>
+
+# Pull latest update for all submodules and their own submodules
+git submodule update --remote --recursive
+
+# Pull latest update for a submodule and its own submodules
+git submodule update --remote --recursive third_party/<repo_name>
