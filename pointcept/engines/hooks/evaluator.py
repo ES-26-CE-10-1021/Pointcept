@@ -642,3 +642,148 @@ class InsSegEvaluator(HookBase):
             )
             self.trainer.comm_info["current_metric_value"] = all_ap_50  # save for saver
             self.trainer.comm_info["current_metric_name"] = "AP50"  # save for saver
+
+
+@HOOKS.register_module()
+class ObjDetEvaluator(HookBase):
+    """
+    Evaluation hook for 3D object detection (e.g. 3DETR) using AP25 / AP50.
+
+    Uses APCalculator from third_party/3detr to compute mean AP at IoU
+    thresholds 0.25 and 0.50. The primary metric reported to CheckpointSaver
+    is AP50.
+
+    Expected model output: dict with keys 'outputs' and 'aux_outputs'
+    (as returned by Model3DETRDetector in eval mode).
+
+    Config must set:
+        num_semcls (int): number of detection classes (default 18)
+        class_names (list[str]): ordered class name list
+    """
+
+    def after_epoch(self):
+        if self.trainer.cfg.evaluate:
+            self.eval()
+
+    def eval(self):
+        from pointcept.models.detection_3detr.dataset_config import _setup_3detr_path
+        _setup_3detr_path()
+        from utils.ap_calculator import APCalculator, get_ap_config_dict
+
+        self.trainer.logger.info(">>>>>>>>>>>>>>>> Start Detection Evaluation >>>>>>>>>>>>>>>>")
+        self.trainer.model.eval()
+
+        num_semcls = getattr(self.trainer.cfg, "num_semcls", 18)
+        class_names = getattr(
+            self.trainer.cfg, "class_names", [str(i) for i in range(num_semcls)]
+        )
+        class2type_map = {i: name for i, name in enumerate(class_names)}
+
+        # Provide a minimal proxy so per_class_proposal works without a full dataset object
+        class _SemClsProxy:
+            def __init__(self, n):
+                self.num_semcls = n
+
+        ap_config_dict = get_ap_config_dict(
+            remove_empty_box=True,    # exact_eval=True, matches native 3DETR evaluate()
+            use_3d_nms=True,
+            nms_iou=0.25,
+            cls_nms=True,
+            per_class_proposal=True,
+            conf_thresh=0.05,
+            dataset_config=_SemClsProxy(num_semcls),
+        )
+        # Single calculator handles both IoU thresholds in one pass
+        ap_calculator = APCalculator(
+            dataset_config=_SemClsProxy(num_semcls),
+            ap_iou_thresh=[0.25, 0.5],
+            class2type_map=class2type_map,
+            ap_config_dict=ap_config_dict,
+        )
+
+        total_loss = 0.0
+        num_batches = 0
+        for i, input_dict in enumerate(self.trainer.val_loader):
+            for key in input_dict.keys():
+                if isinstance(input_dict[key], torch.Tensor):
+                    input_dict[key] = input_dict[key].cuda(non_blocking=True)
+
+            with torch.no_grad():
+                self.trainer.model.train()
+                loss_out = self.trainer.model(input_dict)
+                self.trainer.model.eval()
+                output_dict = self.trainer.model(input_dict)
+
+            if "loss" in loss_out:
+                total_loss += loss_out["loss"].item()
+                num_batches += 1
+
+            # step_meter handles both parse_predictions and make_gt_list internally
+            ap_calculator.step_meter(output_dict, input_dict)
+
+            if (i + 1) % 50 == 0 or (i + 1) == len(self.trainer.val_loader):
+                self.trainer.logger.info(
+                    "Test: [{iter}/{max_iter}]".format(
+                        iter=i + 1, max_iter=len(self.trainer.val_loader)
+                    )
+                )
+
+        loss_avg = total_loss / max(num_batches, 1)
+
+        # Gather per-GPU accumulated results to rank 0 before computing metrics
+        comm.synchronize()
+        all_pred = comm.gather(ap_calculator.pred_map_cls, dst=0)
+        all_gt = comm.gather(ap_calculator.gt_map_cls, dst=0)
+
+        if comm.is_main_process():
+            # Merge per-GPU dicts, re-keying to avoid index collisions
+            merged_pred, merged_gt, scan_cnt = {}, {}, 0
+            for pred_dict, gt_dict in zip(all_pred, all_gt):
+                for local_id in sorted(pred_dict.keys()):
+                    merged_pred[scan_cnt] = pred_dict[local_id]
+                    merged_gt[scan_cnt] = gt_dict[local_id]
+                    scan_cnt += 1
+            ap_calculator.pred_map_cls = merged_pred
+            ap_calculator.gt_map_cls = merged_gt
+
+            # compute_metrics() returns {iou_thresh: {"mAP": float, "<cls> Average Precision": float, ...}}
+            metrics = ap_calculator.compute_metrics()
+            # compute_metrics() returns values in [0, 1]; multiply by 100 for display
+            ap25 = metrics[0.25]["mAP"] * 100
+            ap50 = metrics[0.5]["mAP"] * 100
+
+            self.trainer.logger.info(
+                "Val result: loss/AP25/AP50 {:.4f}/{:.2f}/{:.2f}".format(loss_avg, ap25, ap50)
+            )
+            for cls_name in class_names:
+                key = "{} Average Precision".format(cls_name)
+                ap25_cls = metrics[0.25].get(key, float("nan")) * 100
+                ap50_cls = metrics[0.5].get(key, float("nan")) * 100
+                self.trainer.logger.info(
+                    "  {:20s}: AP25={:.2f}  AP50={:.2f}".format(cls_name, ap25_cls, ap50_cls)
+                )
+
+            current_epoch = self.trainer.epoch + 1
+            if self.trainer.writer is not None:
+                self.trainer.writer.add_scalar("val/loss", loss_avg, current_epoch)
+                self.trainer.writer.add_scalar("val/AP25", ap25, current_epoch)
+                self.trainer.writer.add_scalar("val/AP50", ap50, current_epoch)
+                if self.trainer.cfg.enable_wandb:
+                    wandb.log(
+                        {
+                            "Epoch": current_epoch,
+                            "val/loss": loss_avg,
+                            "val/AP25": ap25,
+                            "val/AP50": ap50,
+                        },
+                        step=wandb.run.step,
+                    )
+
+            self.trainer.logger.info("<<<<<<<<<<<<<<<<< End Detection Evaluation <<<<<<<<<<<<<<<<<")
+            self.trainer.comm_info["current_metric_value"] = ap50
+            self.trainer.comm_info["current_metric_name"] = "AP50"
+
+    def after_train(self):
+        self.trainer.logger.info(
+            "Best AP50: {:.2f}".format(self.trainer.best_metric_value)
+        )

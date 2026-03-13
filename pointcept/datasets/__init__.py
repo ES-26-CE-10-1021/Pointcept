@@ -20,5 +20,8 @@ from .waymo import WaymoDataset
 from .modelnet import ModelNetDataset
 from .shapenet_part import ShapeNetPartDataset
 
+# 3D object detection
+from .scannet_detection import ScanNetDetectionDataset
+
 # dataloader
 from .dataloader import MultiDatasetDataloader
