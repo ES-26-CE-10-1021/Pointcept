@@ -101,6 +101,8 @@ class AgcoRealDinoDataset(DefaultDataset):
         coord_path = self.data_list[idx % len(self.data_list)]
         dir_path, filename = os.path.split(coord_path)
 
+        data_dict["name"] = self.get_data_name(idx)
+
         seg_dir = os.path.join(os.path.dirname(dir_path), "segment")
         seg_path = os.path.join(seg_dir, filename)
 
