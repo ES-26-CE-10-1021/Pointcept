@@ -11,7 +11,7 @@ sync_bn = True
 num_worker_per_gpu = 15
 EPOCHS = 2
 enable_wandb = True
-wandb_project = "PTv3-late-fusion"
+wandb_project = "PTv3-baseline"
 
 # dataset settings
 dataset_type = "AgcoRealDinoDataset"
@@ -29,12 +29,11 @@ label_names = [
 ]
 
 # model settings
-# Late fusion: vanilla PTv3 backbone, DINO features concatenated after backbone via KNN
-# backbone_out_channels = dec_channels[0] (64) + DINO feature dim (1280) = 1344
+# Baseline: vanilla PTv3, no DINO fusion
 model = dict(
-    type="DINOEnhancedSegmentor",
+    type="DefaultSegmentorV2",
     num_classes=len(label_names),
-    backbone_out_channels=64 + 1280,
+    backbone_out_channels=64,
     backbone=dict(
         type="PT-v3m1",
         in_channels=3,
@@ -89,12 +88,6 @@ scheduler = dict(
 )
 param_dicts = [dict(keyword="block", lr=0.0002)]
 
-# Register dino_feat for subsampling by GridSample
-_index_valid_keys = [
-    "coord", "color", "normal", "superpoint",
-    "strength", "segment", "instance", "dino_feat",
-]
-
 data = dict(
     num_classes=len(label_names),
     ignore_index=ignore_index,
@@ -104,7 +97,6 @@ data = dict(
         split="train",
         data_root=data_root,
         transform=[
-            dict(type="Update", keys_dict={"index_valid_keys": _index_valid_keys}),
             dict(type="RandomRotate", angle=[-1, 1], axis="z", center=[0, 0, 0], p=0.5),
             dict(type="RandomRotate", angle=[-0.3, -0.3], axis="y", p=1.0),
             dict(type="PointClip", point_cloud_range=(-75.2, -75.2, -4, 75.2, 75.2, 2)),
@@ -118,15 +110,10 @@ data = dict(
                 mode="train",
                 return_grid_coord=True,
             ),
-            # Copy coord to dino_coord and origin_coord after GridSample
-            # (dino_feat already subsampled alongside coord by GridSample)
-            dict(type="Copy", keys_dict={"coord": "dino_coord"}),
-            dict(type="Copy", keys_dict={"coord": "origin_coord"}),
             dict(type="ToTensor"),
             dict(
                 type="Collect",
-                keys=("coord", "grid_coord", "segment", "dino_feat", "dino_coord", "origin_coord"),
-                offset_keys_dict=dict(offset="coord", dino_offset="dino_coord", origin_offset="origin_coord"),
+                keys=("coord", "grid_coord", "segment"),
                 feat_keys=("coord",),
             ),
         ],
@@ -138,7 +125,6 @@ data = dict(
         split="val",
         data_root=data_root,
         transform=[
-            dict(type="Update", keys_dict={"index_valid_keys": _index_valid_keys}),
             dict(type="Copy", keys_dict={"segment": "origin_segment"}),
             dict(type="RandomRotate", angle=[-0.3, -0.3], axis="y", p=1.0),
             dict(type="PointClip", point_cloud_range=(-75.2, -75.2, -4, 75.2, 75.2, 2)),
@@ -150,14 +136,10 @@ data = dict(
                 return_grid_coord=True,
                 return_inverse=True,
             ),
-            dict(type="Copy", keys_dict={"coord": "dino_coord"}),
-            dict(type="Copy", keys_dict={"coord": "origin_coord"}),
             dict(type="ToTensor"),
             dict(
                 type="Collect",
-                keys=("coord", "grid_coord", "segment", "origin_segment", "inverse",
-                      "dino_feat", "dino_coord", "origin_coord"),
-                offset_keys_dict=dict(offset="coord", dino_offset="dino_coord", origin_offset="origin_coord"),
+                keys=("coord", "grid_coord", "segment", "origin_segment", "inverse"),
                 feat_keys=("coord",),
             ),
         ],
@@ -169,7 +151,6 @@ data = dict(
         split="test",
         data_root=data_root,
         transform=[
-            dict(type="Update", keys_dict={"index_valid_keys": _index_valid_keys}),
             dict(type="PointClip", point_cloud_range=(-75.2, -75.2, -4, 75.2, 75.2, 2)),
             dict(type="Copy", keys_dict={"segment": "origin_segment"}),
             dict(

@@ -3,7 +3,7 @@ _base_ = ["../_base_/default_runtime.py"]
 # misc custom setting
 batch_size = 16  # bs: total bs in all gpus
 gradient_accumulation_steps = 1
-num_worker = 60
+num_worker = 15
 mix_prob = 0.8
 empty_cache = True
 enable_amp = True
