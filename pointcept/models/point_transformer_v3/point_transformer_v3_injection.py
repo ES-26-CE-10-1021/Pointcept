@@ -751,24 +751,16 @@ class PointTransformerV3Injection(PointModule):
                 self.dec.add(module=dec, name=f"dec{s}")
 
     def forward(self, data_dict):
-        dino_feat = data_dict.get("dino_feat", None)
         point = Point(data_dict)
         point.serialization(order=self.order, shuffle_orders=self.shuffle_orders)
         point.sparsify()
 
         point = self.embedding(point)
+        # dino_feat flows through encoder pooling layers to match size of other feature dim
+        # dino_feat shouldn't affect the weights of the encoder as 'use_dino = False'
         point = self.enc(point)
         if not self.cls_mode:
-            # reattach before decoder (ensure it's on same device & dtype)
-            if dino_feat is not None:
-                # Convert numpy -> tensor if needed, and move to device
-                if not torch.is_tensor(dino_feat):
-                    dino_feat = torch.from_numpy(dino_feat)
-                dino_feat = dino_feat.to(point.feat.device)
-                # attach to point (will be visible to decoder Blocks)
-                point["dino_feat"] = dino_feat
-            else:
-                raise RuntimeError("no dino feat in data dict", data_dict)
+            # dino_feat is already at the correct resolution after being pooled through the encoder stages
             point = self.dec(point)
         # else:
         #     point.feat = torch_scatter.segment_csr(
