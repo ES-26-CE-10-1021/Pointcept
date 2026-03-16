@@ -3,13 +3,13 @@ _base_ = ["../_base_/default_runtime.py"]
 # misc custom setting
 batch_size = 16  # bs: total bs in all gpus
 gradient_accumulation_steps = 1
-num_worker = 15
+num_worker = 8
 mix_prob = 0.8
 empty_cache = True
 enable_amp = True
 sync_bn = True
-num_worker_per_gpu = 15
-EPOCHS = 2
+num_worker_per_gpu = 8
+EPOCHS = 50
 enable_wandb = True
 wandb_project = "PTv3-deep-fusion"
 
@@ -76,7 +76,7 @@ model = dict(
 
 # scheduler settings
 epoch = EPOCHS
-eval_epoch = EPOCHS
+eval_epoch = EPOCHS // 5
 optimizer = dict(type="AdamW", lr=0.002, weight_decay=0.005)
 scheduler = dict(
     type="OneCycleLR",

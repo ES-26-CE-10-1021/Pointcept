@@ -9,7 +9,7 @@ empty_cache = True
 enable_amp = True
 sync_bn = True
 num_worker_per_gpu = 15
-EPOCHS = 2
+EPOCHS = 50
 enable_wandb = True
 wandb_project = "PTv3-baseline"
 
@@ -76,7 +76,7 @@ model = dict(
 
 # scheduler settings
 epoch = EPOCHS
-eval_epoch = EPOCHS
+eval_epoch = EPOCHS // 5
 optimizer = dict(type="AdamW", lr=0.002, weight_decay=0.005)
 scheduler = dict(
     type="OneCycleLR",

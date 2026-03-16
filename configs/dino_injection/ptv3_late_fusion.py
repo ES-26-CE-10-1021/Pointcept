@@ -9,7 +9,7 @@ empty_cache = True
 enable_amp = True
 sync_bn = True
 num_worker_per_gpu = 15
-EPOCHS = 2
+EPOCHS = 50
 enable_wandb = True
 wandb_project = "PTv3-late-fusion"
 
@@ -30,11 +30,13 @@ label_names = [
 
 # model settings
 # Late fusion: vanilla PTv3 backbone, DINO features concatenated after backbone via KNN
-# backbone_out_channels = dec_channels[0] (64) + DINO feature dim (1280) = 1344
 model = dict(
     type="DINOEnhancedSegmentor",
     num_classes=len(label_names),
-    backbone_out_channels=64 + 1280,
+    backbone_out_channels=64,
+    dino_feat_size=1280,
+    project_dino_feat=False, # Projects dino feature vector to backbone_out_channels before concat
+    normalize_dino_feat=False, # Normalizes backbone and dino features before concat
     backbone=dict(
         type="PT-v3m1",
         in_channels=3,
@@ -77,7 +79,7 @@ model = dict(
 
 # scheduler settings
 epoch = EPOCHS
-eval_epoch = EPOCHS
+eval_epoch = EPOCHS // 5
 optimizer = dict(type="AdamW", lr=0.002, weight_decay=0.005)
 scheduler = dict(
     type="OneCycleLR",
