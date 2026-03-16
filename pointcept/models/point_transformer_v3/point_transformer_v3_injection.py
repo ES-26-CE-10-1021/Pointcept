@@ -320,9 +320,10 @@ class Block(PointModule):
         )
 
     def forward(self, point: Point):
-        shortcut = point.feat
-        dino_feat = None
+
+        # Dino feature injection
         if self.use_dino:
+            dino_feat = None
             if "dino_feat" in point:
                 val = point["dino_feat"]
                 # Handle both tensor and Point-wrapped formats
@@ -339,21 +340,14 @@ class Block(PointModule):
                 # project into the same feature dimension as point.feat
                 projected_dino = self.dino_projection(dino_feat)
                 # fuse with current feature
-                
-                # print (shortcut.size(), point.feat.size(), projected_dino.size())
-                try:
-                    point.feat = shortcut + point.feat + projected_dino
-                except Exception as e:
-                    point.feat = shortcut + point.feat
+                point.feat = point.feat + projected_dino
 
-                    # print(e, shortcut.size(), point.feat.size(), projected_dino.size())
-        else:
-            # raise RuntimeError("no dino feat", point)
-            point.feat = shortcut + point.feat
-
-
+        # CPE with residual
+        shortcut = point.feat
         point = self.cpe(point)
-        # point.feat = shortcut + point.feat + self.dino_projection(dino_feat)
+        point.feat = shortcut + point.feat
+
+        # Attention with residual
         shortcut = point.feat
         if self.pre_norm:
             point = self.norm1(point)
@@ -362,6 +356,7 @@ class Block(PointModule):
         if not self.pre_norm:
             point = self.norm1(point)
 
+        # MLP with residual
         shortcut = point.feat
         if self.pre_norm:
             point = self.norm2(point)
@@ -369,6 +364,7 @@ class Block(PointModule):
         point.feat = shortcut + point.feat
         if not self.pre_norm:
             point = self.norm2(point)
+
         point.sparse_conv_feat = point.sparse_conv_feat.replace_feature(point.feat)
         return point
 
