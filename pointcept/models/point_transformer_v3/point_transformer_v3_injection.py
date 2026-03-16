@@ -321,8 +321,8 @@ class Block(PointModule):
 
     def forward(self, point: Point):
 
-        # Dino feature injection
-        if self.use_dino:
+        # Dino feature injection (can be disabled at test time via disable_dino flag)
+        if self.use_dino and not getattr(self, "disable_dino", False):
             dino_feat = None
             if "dino_feat" in point:
                 val = point["dino_feat"]
@@ -602,6 +602,7 @@ class PointTransformerV3Injection(PointModule):
         pdnorm_adaptive=False,
         pdnorm_affine=True,
         pdnorm_conditions=("ScanNet", "S3DIS", "Structured3D"),
+        disable_dino=False,
     ):
         super().__init__()
         self.num_stages = len(enc_depths)
@@ -749,6 +750,19 @@ class PointTransformerV3Injection(PointModule):
                         name=f"block{i}",
                     )
                 self.dec.add(module=dec, name=f"dec{s}")
+
+        # Optionally disable DINO injection at init (for test-time diagnostics)
+        if disable_dino:
+            self.set_dino_injection(enabled=False)
+
+    def set_dino_injection(self, enabled=True):
+        """Enable or disable DINO injection in all decoder blocks.
+        Useful for diagnostics: evaluate a trained checkpoint with DINO disabled
+        to check whether the backbone learned geometric features independently.
+        """
+        for module in self.dec.modules():
+            if isinstance(module, Block) and module.use_dino:
+                module.disable_dino = not enabled
 
     def forward(self, data_dict):
         point = Point(data_dict)
