@@ -7,7 +7,7 @@ from .defaults import DefaultDataset
 import open3d as o3d
 import matplotlib.pyplot as plt
 
-from sklearn.decomposition import PCA 
+# from sklearn.decomposition import PCA 
 
 @DATASETS.register_module()
 class AgcoRealDinoDataset(DefaultDataset):

@@ -15,6 +15,7 @@ from .aeo import AEODataset
 from .semantic_kitti import SemanticKITTIDataset
 from .nuscenes import NuScenesDataset
 from .waymo import WaymoDataset
+from .agco_real_dino_injection import AgcoRealDinoDataset
 
 # object
 from .modelnet import ModelNetDataset
