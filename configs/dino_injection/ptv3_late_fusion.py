@@ -89,10 +89,11 @@ scheduler = dict(
 )
 param_dicts = [dict(keyword="block", lr=0.0002)]
 
-# Register dino_feat for subsampling by GridSample
+# Register dino_feat, dino_coord, origin_coord for subsampling by GridSample
 _index_valid_keys = [
     "coord", "color", "normal", "superpoint",
-    "strength", "segment", "instance", "dino_feat",
+    "strength", "segment", "instance",
+    "dino_feat", "dino_coord", "origin_coord",
 ]
 
 data = dict(
@@ -179,6 +180,8 @@ data = dict(
                 mode="train",
                 return_inverse=True,
             ),
+            dict(type="Copy", keys_dict={"coord": "dino_coord"}),
+            dict(type="Copy", keys_dict={"coord": "origin_coord"}),
         ],
         test_mode=True,
         test_cfg=dict(
@@ -194,7 +197,8 @@ data = dict(
                 dict(type="ToTensor"),
                 dict(
                     type="Collect",
-                    keys=("coord", "grid_coord", "index"),
+                    keys=("coord", "grid_coord", "index", "dino_feat", "dino_coord", "origin_coord"),
+                    offset_keys_dict=dict(offset="coord", dino_offset="dino_coord", origin_offset="origin_coord"),
                     feat_keys=("coord",),
                 ),
             ],

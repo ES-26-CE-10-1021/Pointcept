@@ -184,7 +184,7 @@ data = dict(
                 dict(type="ToTensor"),
                 dict(
                     type="Collect",
-                    keys=("coord", "grid_coord", "index"),
+                    keys=("coord", "grid_coord", "index", "dino_feat"),
                     feat_keys=("coord",),
                 ),
             ],
