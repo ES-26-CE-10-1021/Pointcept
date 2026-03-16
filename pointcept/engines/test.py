@@ -1412,6 +1412,16 @@ class ObjDetTester(TesterBase):
                 ap50_cls = metrics[0.5].get(key, float("nan")) * 100
                 logger.info("  {:20s}: AP25={:.2f}  AP50={:.2f}".format(cls_name, ap25_cls, ap50_cls))
 
+            if self.cfg.enable_wandb:
+                import wandb
+                if wandb.run is not None:
+                    wandb_dict = {"test/AP25": ap25, "test/AP50": ap50}
+                    for cls_name in class_names:
+                        key = "{} Average Precision".format(cls_name)
+                        wandb_dict["test/AP25_{}".format(cls_name)] = metrics[0.25].get(key, float("nan")) * 100
+                        wandb_dict["test/AP50_{}".format(cls_name)] = metrics[0.5].get(key, float("nan")) * 100
+                    wandb.log(wandb_dict)
+
         comm.synchronize()
 
     @staticmethod
