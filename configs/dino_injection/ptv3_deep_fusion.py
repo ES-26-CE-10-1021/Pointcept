@@ -1,21 +1,21 @@
 _base_ = ["../_base_/default_runtime.py"]
 
 # misc custom setting
-batch_size = 10  # bs: total bs in all gpus
+batch_size = 16  # bs: total bs in all gpus
 gradient_accumulation_steps = 1
-num_worker = 3
+num_worker = 60
 mix_prob = 0.8
 empty_cache = True
 enable_amp = True
 sync_bn = True
-num_worker_per_gpu = 2
-EPOCHS = 50
+num_worker_per_gpu = 15
+EPOCHS = 2
 enable_wandb = True
 wandb_project = "PTv3-deep-fusion"
 
 # dataset settings
 dataset_type = "AgcoRealDinoDataset"
-data_root = "/media/ai/T7/agco_ttcbtg/"
+data_root = "/mnt/data/pointcloud_datasets/agco_ttcbtg/"
 ignore_index = -1
 label_names = [
     "ground",
