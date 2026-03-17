@@ -9,7 +9,7 @@ channels:
 dependencies:
   - python=3.10
   - pip
-  - cuda
+  - cuda=12.4.1
   - conda-forge::cudnn
   - gcc=13.2
   - gxx=13.2

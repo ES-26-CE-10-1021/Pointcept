@@ -1322,3 +1322,109 @@ class InsSegTester(TesterBase):
     def collate_fn(batch):
         # Restrict to bs 1
         return batch[0]
+
+
+@TESTERS.register_module()
+class ObjDetTester(TesterBase):
+    """
+    Tester for 3D object detection models (e.g. 3DETR).
+
+    Runs inference over the test set, accumulates per-scene predictions,
+    and reports AP25 / AP50 using the APCalculator from 3DETR.
+
+    The config must specify:
+        tester = dict(type="ObjDetTester")
+        data.test = dict(type="ScanNetDetectionDataset", ...)
+        num_semcls (int): number of semantic classes (18 for ScanNet)
+        class_names (list[str]): ordered class name strings
+    """
+
+    def test(self):
+        from pointcept.models.detection_3detr.dataset_config import _setup_3detr_path
+        _setup_3detr_path()
+        from utils.ap_calculator import APCalculator, get_ap_config_dict
+
+        logger = get_root_logger()
+        logger.info(">>>>>>>>>>>>>>>> Start 3D Detection Evaluation >>>>>>>>>>>>>>>>")
+
+        num_semcls = getattr(self.cfg, "num_semcls", 18)
+        class_names = getattr(self.cfg, "class_names", [str(i) for i in range(num_semcls)])
+        class2type_map = {i: name for i, name in enumerate(class_names)}
+
+        class _SemClsProxy:
+            def __init__(self, n):
+                self.num_semcls = n
+
+        ap_config_dict = get_ap_config_dict(
+            remove_empty_box=True,
+            use_3d_nms=True,
+            nms_iou=0.25,
+            cls_nms=True,
+            per_class_proposal=True,
+            conf_thresh=0.05,
+            dataset_config=_SemClsProxy(num_semcls),
+        )
+        ap_calculator = APCalculator(
+            dataset_config=_SemClsProxy(num_semcls),
+            ap_iou_thresh=[0.25, 0.5],
+            class2type_map=class2type_map,
+            ap_config_dict=ap_config_dict,
+        )
+
+        self.model.eval()
+
+        for idx, batch in enumerate(self.test_loader):
+            for key in batch:
+                if isinstance(batch[key], torch.Tensor):
+                    batch[key] = batch[key].cuda(non_blocking=True)
+
+            with torch.no_grad():
+                outputs = self.model(batch)
+
+            ap_calculator.step_meter(outputs, batch)
+
+            if (idx + 1) % 20 == 0 or (idx + 1) == len(self.test_loader):
+                logger.info(f"Processed {idx + 1}/{len(self.test_loader)} batches")
+
+        # Gather per-GPU results to rank 0
+        comm.synchronize()
+        all_pred = comm.gather(ap_calculator.pred_map_cls, dst=0)
+        all_gt = comm.gather(ap_calculator.gt_map_cls, dst=0)
+
+        if comm.is_main_process():
+            merged_pred, merged_gt, scan_cnt = {}, {}, 0
+            for pred_dict, gt_dict in zip(all_pred, all_gt):
+                for local_id in sorted(pred_dict.keys()):
+                    merged_pred[scan_cnt] = pred_dict[local_id]
+                    merged_gt[scan_cnt] = gt_dict[local_id]
+                    scan_cnt += 1
+            ap_calculator.pred_map_cls = merged_pred
+            ap_calculator.gt_map_cls = merged_gt
+
+            metrics = ap_calculator.compute_metrics()
+            ap25 = metrics[0.25]["mAP"] * 100
+            ap50 = metrics[0.5]["mAP"] * 100
+            logger.info("Test result: AP25/AP50 {:.2f}/{:.2f}".format(ap25, ap50))
+
+            for cls_name in class_names:
+                key = "{} Average Precision".format(cls_name)
+                ap25_cls = metrics[0.25].get(key, float("nan")) * 100
+                ap50_cls = metrics[0.5].get(key, float("nan")) * 100
+                logger.info("  {:20s}: AP25={:.2f}  AP50={:.2f}".format(cls_name, ap25_cls, ap50_cls))
+
+            if self.cfg.enable_wandb:
+                import wandb
+                if wandb.run is not None:
+                    wandb_dict = {"test/AP25": ap25, "test/AP50": ap50}
+                    for cls_name in class_names:
+                        key = "{} Average Precision".format(cls_name)
+                        wandb_dict["test/AP25_{}".format(cls_name)] = metrics[0.25].get(key, float("nan")) * 100
+                        wandb_dict["test/AP50_{}".format(cls_name)] = metrics[0.5].get(key, float("nan")) * 100
+                    wandb.log(wandb_dict)
+
+        comm.synchronize()
+
+    @staticmethod
+    def collate_fn(batch):
+        from torch.utils.data.dataloader import default_collate
+        return default_collate(batch)
