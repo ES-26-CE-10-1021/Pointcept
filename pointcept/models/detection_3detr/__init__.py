@@ -8,3 +8,4 @@ from .components import (
 )
 from .criterion import SetCriterion3DETR
 from .model import Model3DETRDetector, dense2point, point2dense
+from .ptv3 import PTv3PreEncoder
