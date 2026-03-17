@@ -28,6 +28,30 @@ from models.transformer import (
 
 
 @MODULES.register_module()
+class IdentityEncoder3DETR(nn.Module):
+    """
+    Passthrough encoder — returns inputs unchanged.
+
+    Use when the pre_encoder (e.g. a PTv3-based component) already produces
+    encoder-quality features and no additional transformer layers are needed
+    before the 3DETR decoder.
+    """
+
+    def forward(self, features, xyz):
+        """
+        Args:
+            features: (npoint, B, C) point features
+            xyz:      (B, npoint, 3) coordinates
+
+        Returns:
+            xyz: (B, npoint, 3) unchanged
+            features: (npoint, B, C) unchanged
+            inds: None
+        """
+        return xyz, features, None
+
+
+@MODULES.register_module()
 class PointnetSAPreEncoder(nn.Module):
     """
     PointNet++ Set Abstraction pre-encoder used in 3DETR.

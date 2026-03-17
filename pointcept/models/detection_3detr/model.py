@@ -22,6 +22,8 @@ import torch.nn as nn
 
 from pointcept.models.builder import MODELS, MODULES
 from pointcept.models.losses.builder import LOSSES
+from pointcept.models.utils.structure import Point
+from pointcept.models.utils import offset2bincount
 from .dataset_config import _setup_3detr_path
 
 _setup_3detr_path()
@@ -30,6 +32,55 @@ from third_party.pointnet2.pointnet2_utils import furthest_point_sample
 from models.helpers import GenericMLP
 from models.position_embedding import PositionEmbeddingCoordsSine
 from utils.pc_util import scale_points, shift_scale_points
+
+
+def dense2point(xyz, features=None):
+    """Convert dense tensors to a Pointcept Point object.
+
+    Args:
+        xyz:      (B, N, 3) point coordinates
+        features: (B, C, N) point features, or None (uses xyz as feat)
+
+    Returns:
+        Point with coord (B*N, 3), feat (B*N, C), offset (B,)
+        All scenes have equal length N, so offset = [N, 2N, ..., B*N].
+    """
+    B, N, _ = xyz.shape
+    coord = xyz.reshape(B * N, 3)
+    feat = (
+        features.permute(0, 2, 1).reshape(B * N, features.shape[1])
+        if features is not None
+        else coord.clone()
+    )
+    offset = torch.arange(1, B + 1, device=xyz.device, dtype=torch.long) * N
+    return Point(dict(coord=coord, feat=feat, offset=offset))
+
+
+def point2dense(point):
+    """Convert a Pointcept Point object to padded dense tensors.
+
+    Scenes shorter than the longest are zero-padded.
+
+    Args:
+        point: Point with coord (total, 3), feat (total, C), offset (B,)
+
+    Returns:
+        xyz_out:  (B, max_n, 3)
+        feat_out: (B, C, max_n)
+    """
+    counts = offset2bincount(point.offset)  # (B,)
+    B = len(counts)
+    max_n = counts.max().item()
+    enc_dim = point.feat.shape[-1]
+    xyz_out = point.coord.new_zeros(B, max_n, 3)
+    feat_out = point.feat.new_zeros(B, enc_dim, max_n)
+    start = 0
+    for b in range(B):
+        n = counts[b].item()
+        xyz_out[b, :n] = point.coord[start : start + n]
+        feat_out[b, :, :n] = point.feat[start : start + n].T
+        start += n
+    return xyz_out, feat_out  # (B, max_n, 3), (B, C, max_n)
 
 
 class BoxProcessor:
@@ -217,15 +268,23 @@ class Model3DETRDetector(nn.Module):
         xyz, features = self._break_up_pc(point_clouds)
 
         if self.pre_encoder is not None:
-            pre_enc_xyz, pre_enc_features, pre_enc_inds = self.pre_encoder(xyz, features)
+            result = self.pre_encoder(xyz, features)
+            if isinstance(result, Point):
+                # Point-returning pre-encoder (e.g. a PTv3-based component)
+                pre_enc_xyz, pre_enc_features = point2dense(result)
+                pre_enc_inds = None
+            else:
+                pre_enc_xyz, pre_enc_features, pre_enc_inds = result
             # nn.MultiHeadAttention expects (npoints, B, C)
             pre_enc_features = pre_enc_features.permute(2, 0, 1)
         else:
             # No pre-encoder: project raw XYZ (+ optional features) to encoder_dim.
             pre_enc_xyz = xyz  # (B, N, 3)
-            pre_enc_inds = torch.arange(
-                xyz.shape[1], device=xyz.device
-            ).unsqueeze(0).expand(xyz.shape[0], -1)
+            pre_enc_inds = (
+                torch.arange(xyz.shape[1], device=xyz.device)
+                .unsqueeze(0)
+                .expand(xyz.shape[0], -1)
+            )
             if features is not None:
                 # features: (B, C, N) → cat with xyz → (B, N, 3+C)
                 inp = torch.cat([xyz, features.permute(0, 2, 1)], dim=-1)
@@ -234,11 +293,18 @@ class Model3DETRDetector(nn.Module):
             # Project to encoder_dim and convert to (N, B, C)
             pre_enc_features = self.input_projection(inp).permute(1, 0, 2)
 
-        enc_xyz, enc_features, enc_inds = self.encoder(pre_enc_features, xyz=pre_enc_xyz)
+        result = self.encoder(pre_enc_features, xyz=pre_enc_xyz)
+        if isinstance(result, Point):
+            # Point-returning encoder (e.g. a PTv3-based encoder component)
+            enc_xyz, enc_features_dense = point2dense(result)
+            enc_features = enc_features_dense.permute(2, 0, 1)  # → (N'', B, C)
+            enc_inds = None
+        else:
+            enc_xyz, enc_features, enc_inds = result
 
         if enc_inds is None:
             enc_inds = pre_enc_inds
-        else:
+        elif pre_enc_inds is not None:
             enc_inds = torch.gather(pre_enc_inds, 1, enc_inds.type(torch.int64))
 
         return enc_xyz, enc_features, enc_inds
