@@ -18,13 +18,6 @@ import pytest
 import torch
 import torch.nn as nn
 
-# ── path setup ────────────────────────────────────────────────────────────────
-REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-DETR_ROOT = os.path.join(REPO_ROOT, "third_party", "3detr")
-for p in [REPO_ROOT, DETR_ROOT]:
-    if p not in sys.path:
-        sys.path.insert(0, p)
-
 # ── determinism ───────────────────────────────────────────────────────────────
 os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
 
@@ -38,7 +31,6 @@ from pointcept.models.detection_3detr.model import (
 )
 from pointcept.models.detection_3detr.components import (
     IdentityEncoder3DETR,
-    PointnetSAPreEncoder,
 )
 from pointcept.models.detection_3detr.dataset_config import ScanNetDetectionConfig
 
