@@ -83,15 +83,11 @@ def point2dense(point):
             "because no key-padding mask is used. Please pre-pad/trim to a "
             "fixed length or extend the model to handle a padding mask."
         )
+    # All scenes have the same number of points (max_n), and offsets define
+    # contiguous blocks per scene, so we can reshape without breaking autograd.
     enc_dim = point.feat.shape[-1]
-    xyz_out = point.coord.new_zeros(B, max_n, 3)
-    feat_out = point.feat.new_zeros(B, enc_dim, max_n)
-    start = 0
-    for b in range(B):
-        n = counts[b].item()
-        xyz_out[b, :n] = point.coord[start : start + n]
-        feat_out[b, :, :n] = point.feat[start : start + n].T
-        start += n
+    xyz_out = point.coord.reshape(B, max_n, 3)
+    feat_out = point.feat.reshape(B, max_n, enc_dim).permute(0, 2, 1).contiguous()
     return xyz_out, feat_out  # (B, max_n, 3), (B, C, max_n)
 
 

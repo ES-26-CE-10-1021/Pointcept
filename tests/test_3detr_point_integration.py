@@ -157,6 +157,24 @@ class TestDensePointConversions:
         # Verify first scene data is correct
         torch.testing.assert_close(xyz_out[0], coord[:N])
 
+    def test_point2dense_preserves_gradients(self):
+        """point2dense must preserve autograd graph for backprop."""
+        B, N, C = 2, 50, 8
+        coord = torch.randn(B * N, 3, requires_grad=True)
+        feat = torch.randn(B * N, C, requires_grad=True)
+        offset = torch.arange(1, B + 1) * N
+
+        point = Point(dict(coord=coord, feat=feat, offset=offset))
+        xyz_out, feat_out = point2dense(point)
+
+        loss = xyz_out.sum() + feat_out.sum()
+        loss.backward()
+
+        assert coord.grad is not None, "No gradient on coord"
+        assert feat.grad is not None, "No gradient on feat"
+        assert (coord.grad != 0).any(), "Coord gradients are all zero"
+        assert (feat.grad != 0).any(), "Feat gradients are all zero"
+
     def test_batch_field_auto_generated(self):
         """Point init should auto-generate batch from offset."""
         B, N = 3, 10
@@ -672,3 +690,16 @@ class TestPointPreEncoderTraining:
         ]
         assert len(grad_norms) > 0, "No gradients computed"
         assert all(np.isfinite(g) for g in grad_norms), "Non-finite gradients"
+
+        # Ensure gradients propagate through Point conversion to pre-encoder
+        pre_enc_params = [
+            p for p in model.pre_encoder.parameters() if p.requires_grad
+        ]
+        assert len(pre_enc_params) > 0, (
+            "Pre-encoder has no trainable parameters to receive gradients"
+        )
+        for p in pre_enc_params:
+            assert p.grad is not None, "Missing gradient on pre-encoder parameter"
+            assert torch.isfinite(p.grad).all(), (
+                "Non-finite gradient in pre-encoder parameter"
+            )
