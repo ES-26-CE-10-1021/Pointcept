@@ -23,4 +23,7 @@ pip install --no-build-isolation ./third_party/3detr/third_party/pointnet2
 pip install trimesh opencv-python cython
 (cd third_party/3detr/utils && python cython_compile.py build_ext --inplace)
 
+# Testing
+pip install pytest
+
 echo "==> Done! Activate with: conda activate ${ENV_NAME}"
