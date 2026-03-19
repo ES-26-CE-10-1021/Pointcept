@@ -57,20 +57,32 @@ def dense2point(xyz, features=None):
 
 
 def point2dense(point):
-    """Convert a Pointcept Point object to padded dense tensors.
+    """Convert a Pointcept Point object to equal-length dense tensors.
 
-    Scenes shorter than the longest are zero-padded.
+    All scenes must have the same point count. The 3DETR encoder/decoder
+    does not use a key-padding mask, so zero-padded rows would silently
+    corrupt attention weights, FPS query selection, and predictions.
 
     Args:
         point: Point with coord (total, 3), feat (total, C), offset (B,)
 
     Returns:
-        xyz_out:  (B, max_n, 3)
-        feat_out: (B, C, max_n)
+        xyz_out:  (B, N, 3)
+        feat_out: (B, C, N)
+
+    Raises:
+        ValueError: if scenes have different point counts.
     """
     counts = offset2bincount(point.offset)  # (B,)
     B = len(counts)
     max_n = counts.max().item()
+    if (counts != max_n).any():
+        raise ValueError(
+            "point2dense received variable-length scenes (offset-derived counts "
+            f"{counts.tolist()}); this 3DETR path assumes equal-length scenes "
+            "because no key-padding mask is used. Please pre-pad/trim to a "
+            "fixed length or extend the model to handle a padding mask."
+        )
     enc_dim = point.feat.shape[-1]
     xyz_out = point.coord.new_zeros(B, max_n, 3)
     feat_out = point.feat.new_zeros(B, enc_dim, max_n)
@@ -177,7 +189,9 @@ class Model3DETRDetector(nn.Module):
         super().__init__()
 
         # Build sub-components from MODULES registry
-        self.pre_encoder = MODULES.build(pre_encoder) if pre_encoder is not None else None
+        self.pre_encoder = (
+            MODULES.build(pre_encoder) if pre_encoder is not None else None
+        )
 
         # When pre_encoder is None, project raw coordinates (+ optional features)
         # to encoder_dim so the transformer receives the expected channel count.
@@ -259,9 +273,7 @@ class Model3DETRDetector(nn.Module):
 
     def _break_up_pc(self, pc):
         xyz = pc[..., 0:3].contiguous()
-        features = (
-            pc[..., 3:].transpose(1, 2).contiguous() if pc.size(-1) > 3 else None
-        )
+        features = pc[..., 3:].transpose(1, 2).contiguous() if pc.size(-1) > 3 else None
         return xyz, features
 
     def run_encoder(self, point_clouds):
@@ -337,7 +349,9 @@ class Model3DETRDetector(nn.Module):
         center_offset = (
             self.mlp_heads["center_head"](box_features).sigmoid().transpose(1, 2) - 0.5
         )
-        size_normalized = self.mlp_heads["size_head"](box_features).sigmoid().transpose(1, 2)
+        size_normalized = (
+            self.mlp_heads["size_head"](box_features).sigmoid().transpose(1, 2)
+        )
         angle_logits = self.mlp_heads["angle_cls_head"](box_features).transpose(1, 2)
         angle_residual_normalized = self.mlp_heads["angle_residual_head"](
             box_features
@@ -434,7 +448,9 @@ class Model3DETRDetector(nn.Module):
             tgt, enc_features, query_pos=query_embed, pos=enc_pos
         )[0]
 
-        box_predictions = self.get_box_predictions(query_xyz, point_cloud_dims, box_features)
+        box_predictions = self.get_box_predictions(
+            query_xyz, point_cloud_dims, box_features
+        )
 
         if self.training and self.criterion is not None:
             loss, _ = self.criterion(box_predictions, input_dict)

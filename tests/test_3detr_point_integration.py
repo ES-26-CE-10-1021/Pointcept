@@ -130,8 +130,8 @@ class TestDensePointConversions:
         torch.testing.assert_close(point_rt.feat, feat)
         assert point_rt.offset.tolist() == offset.tolist()
 
-    def test_point2dense_variable_lengths(self):
-        """point2dense must zero-pad shorter scenes to max length."""
+    def test_point2dense_variable_lengths_raises(self):
+        """point2dense must reject variable-length scenes (no padding mask)."""
         # Scene 0: 10 points, Scene 1: 20 points
         n0, n1, C = 10, 20, 4
         coord = torch.randn(n0 + n1, 3)
@@ -139,16 +139,23 @@ class TestDensePointConversions:
         offset = torch.tensor([n0, n0 + n1])
 
         point = Point(dict(coord=coord, feat=feat, offset=offset))
+        with pytest.raises(ValueError, match="variable-length scenes"):
+            point2dense(point)
+
+    def test_point2dense_equal_lengths(self):
+        """point2dense must succeed when all scenes have equal length."""
+        B, N, C = 3, 50, 8
+        coord = torch.randn(B * N, 3)
+        feat = torch.randn(B * N, C)
+        offset = torch.arange(1, B + 1) * N
+
+        point = Point(dict(coord=coord, feat=feat, offset=offset))
         xyz_out, feat_out = point2dense(point)
 
-        assert xyz_out.shape == (2, 20, 3)
-        assert feat_out.shape == (2, C, 20)
-        # Scene 0 has 10 points, last 10 should be zero-padded
-        torch.testing.assert_close(xyz_out[0, :n0], coord[:n0])
-        assert (xyz_out[0, n0:] == 0).all()
-        assert (feat_out[0, :, n0:] == 0).all()
-        # Scene 1 has 20 points, no padding
-        torch.testing.assert_close(xyz_out[1], coord[n0:])
+        assert xyz_out.shape == (B, N, 3)
+        assert feat_out.shape == (B, C, N)
+        # Verify first scene data is correct
+        torch.testing.assert_close(xyz_out[0], coord[:N])
 
     def test_batch_field_auto_generated(self):
         """Point init should auto-generate batch from offset."""
