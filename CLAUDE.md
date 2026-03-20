@@ -31,6 +31,11 @@ python tools/test.py --config-file <config>.py --num-gpus <N> --options save_pat
 sh scripts/test.sh -d scannet -c det-3detr-v1m1-0-scannet -n <exp_name> -w model_best -g 1
 ```
 
+### Unit Tests
+```bash
+conda run -n pointcept python -m pytest tests/ -v -s
+```
+
 ### SLURM
 ```bash
 sbatch slurm/<job_script>.slurm
@@ -94,11 +99,13 @@ Located in `libs/`: `pointops` (core point operations), `pointops2`, `pointgroup
 - `third_party/3detr` — 3D Detection Transformer fork (branch `dev`)
 
 ### 3DETR Integration (`pointcept/models/detection_3detr/`)
-Vanilla 3DETR integrated as modular Pointcept components. Key differences from segmentation models:
-- **Input format**: dense `(B, N, C)` tensors, not the `Point` dataclass (which uses concat+offset format for variable-length scenes)
+3DETR integrated as modular Pointcept components with PTv3 encoder support. Key differences from segmentation models:
+- **Input format**: internally converts between dense `(B, N, C)` tensors and the `Point` dataclass (concat+offset) at encoder boundaries
 - **Dataset**: `ScanNetDetectionDataset` reads VoteNet-style data (`*_vert.npy`, `*_bbox.npy`) — separate from Pointcept's segmentation `.npy` format
-- **Registered components**: `Model3DETRDetector` (MODELS), `PointnetSAPreEncoder`, `VanillaTransformerEncoder3DETR`, `MaskedTransformerEncoder3DETR`, `TransformerDecoder3DETR`, `ScanNetDetectionConfig` (MODULES), `SetCriterion3DETR` (LOSSES), `ObjDetEvaluator` (HOOKS), `ObjDetTester` (TESTERS)
-- **`pre_encoder=None`**: skips PointNet++ SA — required for future PTv3 encoder swap; set `input_feature_dim` to match input channels beyond XYZ
+- **Registered components**: `Model3DETRDetector` (MODELS), `PTv3PreEncoder`, `PointnetSAPreEncoder`, `IdentityEncoder3DETR`, `VanillaTransformerEncoder3DETR`, `MaskedTransformerEncoder3DETR`, `TransformerDecoder3DETR`, `ScanNetDetectionConfig` (MODULES), `SetCriterion3DETR` (LOSSES), `ObjDetEvaluator` (HOOKS), `ObjDetTester` (TESTERS)
+- **PTv3 encoder**: `PTv3PreEncoder` wraps PointTransformerV3 as a pre-encoder. Variable-length output from voxelization is handled by `point2dense()` which pads to max scene length and returns a `padding_mask` threaded through the decoder's cross-attention. FPS query sampling masks padded positions by pushing them to `1e6`.
+- **`pre_encoder=None`**: skips PointNet++ SA; set `input_feature_dim` to match input channels beyond XYZ
+- **Configs**: `det-3detr-v1m1-0-scannet.py` (PointNet++ SA encoder), `det-3detr-v2m1-0-scannet.py` (PTv3 encoder)
 - **Evaluation**: AP25/AP50 reported as percentages (0–100); uses `APCalculator.step_meter()` from `third_party/3detr/utils/ap_calculator.py`
 
 ## Key Conventions
