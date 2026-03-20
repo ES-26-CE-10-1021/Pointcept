@@ -268,15 +268,24 @@ class TransformerDecoder3DETR(nn.Module):
             decoder_layer, num_layers=nlayers, return_intermediate=True
         )
 
-    def forward(self, tgt, memory, query_pos=None, pos=None):
+    def forward(
+        self, tgt, memory, query_pos=None, pos=None, memory_key_padding_mask=None
+    ):
         """
         Args:
             tgt: (nqueries, B, C) target (initialised to zeros)
             memory: (npoints, B, C) encoder output
             query_pos: (nqueries, B, C) positional embeddings for queries
             pos: (npoints, B, C) positional embeddings for memory
+            memory_key_padding_mask: (B, npoints) bool, True = ignore
 
         Returns:
             box_features: (nlayers, nqueries, B, C)
         """
-        return self.decoder(tgt, memory, query_pos=query_pos, pos=pos)
+        return self.decoder(
+            tgt,
+            memory,
+            query_pos=query_pos,
+            pos=pos,
+            memory_key_padding_mask=memory_key_padding_mask,
+        )

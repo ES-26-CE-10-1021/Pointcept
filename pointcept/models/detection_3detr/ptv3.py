@@ -4,6 +4,11 @@ PTv3 adapter for the 3DETR pre_encoder slot.
 Bridges the (xyz, features) dense-tensor interface expected by
 Model3DETRDetector.run_encoder to the Point-based interface
 expected by PointTransformerV3.
+
+After encoding, PTv3's voxelization and pooling strides produce
+variable-length outputs per scene. The returned Point is converted
+to padded dense tensors by point2dense(), which also returns a
+padding mask threaded through the 3DETR decoder's cross-attention.
 """
 
 from pointcept.models.builder import MODULES
@@ -18,8 +23,9 @@ class PTv3PreEncoder(PointTransformerV3):
     """PointTransformerV3 wrapped as a 3DETR pre_encoder.
 
     Accepts (xyz, features) in dense format, converts to Point,
-    runs PTv3 encoder, and returns the Point result. The caller
-    (run_encoder) handles Point -> dense conversion via point2dense().
+    runs PTv3 encoder, and returns the Point directly. Variable-length
+    scenes are handled downstream by point2dense() which pads to
+    max_n and returns a padding mask for the decoder's attention.
 
     Args:
         grid_size (float): Voxel size for PTv3 serialization.
@@ -38,7 +44,7 @@ class PTv3PreEncoder(PointTransformerV3):
             features: (B, C, N) point features, or None
 
         Returns:
-            Point with encoded features.
+            Point with encoded features (variable-length scenes).
         """
         point = dense2point(xyz, features)
         point["grid_size"] = self.grid_size

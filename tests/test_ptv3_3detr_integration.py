@@ -29,6 +29,7 @@ for p in [REPO_ROOT, DETR_ROOT]:
 os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
 
 from pointcept.models.utils.structure import Point
+from pointcept.models.utils import offset2bincount
 from pointcept.models.detection_3detr.model import (
     Model3DETRDetector,
     dense2point,
@@ -123,6 +124,88 @@ def _make_batch(B=2, N=5000, device="cuda"):
         "point_cloud_dims_min": pc.amin(dim=1),
         "point_cloud_dims_max": pc.amax(dim=1),
     }
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# A0 — point2dense unit tests (padding + autograd)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestPoint2Dense:
+    """Unit tests for point2dense with variable-length padding."""
+
+    def test_equal_length_no_mask(self):
+        """Equal-length scenes should use reshape fast path (no mask)."""
+        B, N, C = 3, 50, 8
+        coord = torch.randn(B * N, 3)
+        feat = torch.randn(B * N, C)
+        offset = torch.arange(1, B + 1) * N
+
+        point = Point(dict(coord=coord, feat=feat, offset=offset))
+        xyz_out, feat_out, mask = point2dense(point)
+
+        assert mask is None
+        assert xyz_out.shape == (B, N, 3)
+        assert feat_out.shape == (B, C, N)
+
+    def test_equal_length_preserves_autograd(self):
+        """Reshape fast path must preserve autograd."""
+        B, N, C = 2, 20, 4
+        feat = torch.randn(B * N, C, requires_grad=True)
+        coord = torch.randn(B * N, 3)
+        offset = torch.arange(1, B + 1) * N
+
+        point = Point(dict(coord=coord, feat=feat, offset=offset))
+        _, feat_out, _ = point2dense(point)
+        feat_out.sum().backward()
+        assert feat.grad is not None
+
+    def test_variable_length_returns_mask(self):
+        """Variable-length scenes must return a padding mask."""
+        n0, n1, C = 10, 20, 8
+        coord = torch.randn(n0 + n1, 3)
+        feat = torch.randn(n0 + n1, C)
+        offset = torch.tensor([n0, n0 + n1])
+
+        point = Point(dict(coord=coord, feat=feat, offset=offset))
+        xyz_out, feat_out, mask = point2dense(point)
+
+        assert mask is not None
+        assert mask.shape == (2, 20)
+        # Scene 0: 10 real + 10 padded
+        assert mask[0, :10].sum() == 0  # real positions = False
+        assert mask[0, 10:].sum() == 10  # padded positions = True
+        # Scene 1: 20 real, no padding
+        assert mask[1].sum() == 0
+
+    def test_variable_length_preserves_autograd(self):
+        """Pad path (split/F.pad/stack) must preserve autograd."""
+        n0, n1, C = 10, 20, 4
+        feat = torch.randn(n0 + n1, C, requires_grad=True)
+        coord = torch.randn(n0 + n1, 3)
+        offset = torch.tensor([n0, n0 + n1])
+
+        point = Point(dict(coord=coord, feat=feat, offset=offset))
+        _, feat_out, _ = point2dense(point)
+        feat_out.sum().backward()
+        assert feat.grad is not None, "No gradient through padded point2dense"
+
+    def test_variable_length_correct_values(self):
+        """Padded output must contain correct values in real positions."""
+        n0, n1, C = 5, 10, 3
+        coord = torch.arange(n0 + n1, dtype=torch.float).unsqueeze(1).expand(-1, 3)
+        feat = torch.ones(n0 + n1, C)
+        offset = torch.tensor([n0, n0 + n1])
+
+        point = Point(dict(coord=coord, feat=feat, offset=offset))
+        xyz_out, feat_out, mask = point2dense(point)
+
+        # Scene 0 real coords
+        assert torch.allclose(xyz_out[0, :n0], coord[:n0])
+        # Scene 0 padded coords should be zero
+        assert (xyz_out[0, n0:] == 0).all()
+        # Scene 1 real coords
+        assert torch.allclose(xyz_out[1, :n1], coord[n0:])
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -223,14 +306,18 @@ class TestPTv3RunEncoderDispatch:
         """run_encoder with PTv3 pre-encoder should not raise."""
         batch = _make_batch()
         with torch.no_grad():
-            enc_xyz, enc_features, enc_inds = model.run_encoder(batch["point_clouds"])
+            enc_xyz, enc_features, enc_inds, padding_mask = model.run_encoder(
+                batch["point_clouds"]
+            )
 
     def test_run_encoder_output_shapes(self, model):
         """run_encoder output tensors must have consistent shapes."""
         B = 2
         batch = _make_batch(B=B)
         with torch.no_grad():
-            enc_xyz, enc_features, enc_inds = model.run_encoder(batch["point_clouds"])
+            enc_xyz, enc_features, enc_inds, padding_mask = model.run_encoder(
+                batch["point_clouds"]
+            )
         # enc_xyz: (B, N_enc, 3)
         assert enc_xyz.ndim == 3
         assert enc_xyz.shape[0] == B
@@ -244,15 +331,26 @@ class TestPTv3RunEncoderDispatch:
         """PTv3 pre-encoder returns Point → enc_inds should be None."""
         batch = _make_batch()
         with torch.no_grad():
-            _, _, enc_inds = model.run_encoder(batch["point_clouds"])
+            _, _, enc_inds, _ = model.run_encoder(batch["point_clouds"])
         assert enc_inds is None
 
     def test_enc_features_finite(self, model):
         """Encoder features must not contain NaN or Inf."""
         batch = _make_batch()
         with torch.no_grad():
-            _, enc_features, _ = model.run_encoder(batch["point_clouds"])
+            _, enc_features, _, _ = model.run_encoder(batch["point_clouds"])
         assert torch.isfinite(enc_features).all()
+
+    def test_padding_mask_shape(self, model):
+        """Padding mask must match enc_xyz spatial dimension."""
+        B = 2
+        batch = _make_batch(B=B)
+        with torch.no_grad():
+            enc_xyz, _, _, padding_mask = model.run_encoder(batch["point_clouds"])
+        # padding_mask may be None (equal-length) or (B, N_enc)
+        if padding_mask is not None:
+            assert padding_mask.shape == (B, enc_xyz.shape[1])
+            assert padding_mask.dtype == torch.bool
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -457,15 +555,15 @@ class TestConfigConsistency:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# F — point2dense handles PTv3 variable-length output
+# F — Variable-length scenes handled via padding mask
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
 @skip_no_ptv3
 @skip_no_cuda
-class TestPoint2DenseWithPTv3Output:
-    """PTv3 voxelizes per-scene, so output point counts may differ across
-    scenes in the batch. Verify point2dense handles this correctly."""
+class TestPTv3VariableLengthPadding:
+    """PTv3 voxelization + pooling produces variable-length scenes.
+    point2dense must pad them and return a mask for the decoder."""
 
     @pytest.fixture(scope="class")
     def pre_encoder(self):
@@ -474,33 +572,51 @@ class TestPoint2DenseWithPTv3Output:
         pe = MODULES.build(TINY_PTV3_CFG)
         return pe.cuda().eval()
 
-    def test_unequal_scene_counts_padded(self, pre_encoder):
-        """Scenes with different point counts after voxel+pool must be zero-padded."""
-        # Create two scenes with very different spatial extents
-        # Scene 0: tight cluster → fewer voxels
-        # Scene 1: spread out → more voxels
+    def test_point2dense_succeeds_with_variable_length(self, pre_encoder):
+        """point2dense must handle variable-length PTv3 output via padding."""
+        # Different spatial extents to force different voxel counts
         xyz_0 = torch.randn(1, 5000, 3, device="cuda") * 0.5
         xyz_1 = torch.randn(1, 5000, 3, device="cuda") * 5.0
-        xyz = torch.cat([xyz_0, xyz_1], dim=0)  # (2, 5000, 3)
+        xyz = torch.cat([xyz_0, xyz_1], dim=0)
 
         with torch.no_grad():
             point = pre_encoder(xyz, features=None)
 
-        from pointcept.models.utils import offset2bincount
+        # Should not raise — returns padded tensors + mask
+        xyz_dense, feat_dense, mask = point2dense(point)
 
         counts = offset2bincount(point.offset)
-        # The two scenes likely have different point counts after voxelization
-        # (not guaranteed but very likely with 10x scale difference)
-
-        xyz_dense, feat_dense = point2dense(point)
         max_n = counts.max().item()
         assert xyz_dense.shape == (2, max_n, 3)
         assert feat_dense.shape == (2, TINY_ENC_DIM, max_n)
 
-        # Shorter scene should have zero padding at the end
-        min_count = counts.min().item()
-        min_idx = counts.argmin().item()
-        if min_count < max_n:
-            assert (
-                xyz_dense[min_idx, min_count:] == 0
-            ).all(), "Shorter scene not zero-padded"
+    def test_padding_mask_correct(self, pre_encoder):
+        """Padding mask must mark exactly the padded positions."""
+        xyz_0 = torch.randn(1, 5000, 3, device="cuda") * 0.5
+        xyz_1 = torch.randn(1, 5000, 3, device="cuda") * 5.0
+        xyz = torch.cat([xyz_0, xyz_1], dim=0)
+
+        with torch.no_grad():
+            point = pre_encoder(xyz, features=None)
+
+        counts = offset2bincount(point.offset)
+        _, _, mask = point2dense(point)
+
+        if mask is not None:
+            max_n = counts.max().item()
+            for b in range(2):
+                n = counts[b].item()
+                # Real positions should not be masked
+                assert mask[b, :n].sum() == 0, f"Real positions masked in scene {b}"
+                # Padded positions should be masked
+                assert mask[b, n:].sum() == max_n - n, f"Padding not masked in scene {b}"
+
+    def test_padding_preserves_gradients(self, pre_encoder):
+        """Gradients must flow through the padding path back to input."""
+        xyz = (torch.randn(2, 5000, 3, device="cuda") * 2.0).requires_grad_(True)
+        point = pre_encoder(xyz, features=None)
+        xyz_dense, feat_dense, mask = point2dense(point)
+        loss = feat_dense.sum()
+        loss.backward()
+        assert xyz.grad is not None, "No gradient on input xyz"
+        assert (xyz.grad != 0).any(), "All gradients are zero"
