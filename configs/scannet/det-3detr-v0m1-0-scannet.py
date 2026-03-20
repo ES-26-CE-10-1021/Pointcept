@@ -105,6 +105,7 @@ scheduler = dict(
     anneal_strategy="cos",
     div_factor=500.0,          # initial_lr = 5e-4 / 500 = 1e-6 (native: warm_lr)
     final_div_factor=1.0,      # final_lr = 5e-4 / 500 = 1e-6 (native: final_lr)
+    cycle_momentum=False,      # native 3DETR uses constant beta1=0.9
 )
 
 # ── Dataset ───────────────────────────────────────────────────────────────────

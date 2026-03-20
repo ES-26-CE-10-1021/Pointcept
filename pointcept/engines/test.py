@@ -1404,22 +1404,35 @@ class ObjDetTester(TesterBase):
             metrics = ap_calculator.compute_metrics()
             ap25 = metrics[0.25]["mAP"] * 100
             ap50 = metrics[0.5]["mAP"] * 100
+            ar25 = metrics[0.25].get("AR", float("nan")) * 100
+            ar50 = metrics[0.5].get("AR", float("nan")) * 100
             logger.info("Test result: AP25/AP50 {:.2f}/{:.2f}".format(ap25, ap50))
+            logger.info("Test result: AR25/AR50 {:.2f}/{:.2f}".format(ar25, ar50))
 
             for cls_name in class_names:
-                key = "{} Average Precision".format(cls_name)
-                ap25_cls = metrics[0.25].get(key, float("nan")) * 100
-                ap50_cls = metrics[0.5].get(key, float("nan")) * 100
-                logger.info("  {:20s}: AP25={:.2f}  AP50={:.2f}".format(cls_name, ap25_cls, ap50_cls))
+                ap_key = "{} Average Precision".format(cls_name)
+                rec_key = "{} Recall".format(cls_name)
+                ap25_cls = metrics[0.25].get(ap_key, float("nan")) * 100
+                ap50_cls = metrics[0.5].get(ap_key, float("nan")) * 100
+                rec25_cls = metrics[0.25].get(rec_key, float("nan")) * 100
+                rec50_cls = metrics[0.5].get(rec_key, float("nan")) * 100
+                logger.info(
+                    "  {:20s}: AP25={:.2f}  AP50={:.2f}  Rec25={:.2f}  Rec50={:.2f}".format(
+                        cls_name, ap25_cls, ap50_cls, rec25_cls, rec50_cls
+                    )
+                )
 
             if self.cfg.enable_wandb:
                 import wandb
                 if wandb.run is not None:
-                    wandb_dict = {"test/AP25": ap25, "test/AP50": ap50}
+                    wandb_dict = {"test/AP25": ap25, "test/AP50": ap50, "test/AR25": ar25, "test/AR50": ar50}
                     for cls_name in class_names:
-                        key = "{} Average Precision".format(cls_name)
-                        wandb_dict["test/AP25_{}".format(cls_name)] = metrics[0.25].get(key, float("nan")) * 100
-                        wandb_dict["test/AP50_{}".format(cls_name)] = metrics[0.5].get(key, float("nan")) * 100
+                        ap_key = "{} Average Precision".format(cls_name)
+                        rec_key = "{} Recall".format(cls_name)
+                        wandb_dict["test/AP25_{}".format(cls_name)] = metrics[0.25].get(ap_key, float("nan")) * 100
+                        wandb_dict["test/AP50_{}".format(cls_name)] = metrics[0.5].get(ap_key, float("nan")) * 100
+                        wandb_dict["test/Rec25_{}".format(cls_name)] = metrics[0.25].get(rec_key, float("nan")) * 100
+                        wandb_dict["test/Rec50_{}".format(cls_name)] = metrics[0.5].get(rec_key, float("nan")) * 100
                     wandb.log(wandb_dict)
 
         comm.synchronize()
