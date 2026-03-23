@@ -2,6 +2,8 @@
 set -eo pipefail
 
 ENV_NAME="pointcept"
+unset PIP_CONSTRAINT # Disregard /etc/pip/constraint.txt
+
 export TORCH_CUDA_ARCH_LIST="$(nvidia-smi -i 0 --query-gpu=compute_cap --format=csv,noheader)"
 # https://developer.nvidia.com/cuda-gpus
 
