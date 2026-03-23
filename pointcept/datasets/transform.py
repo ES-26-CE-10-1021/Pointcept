@@ -33,6 +33,7 @@ def index_operator(data_dict, index, duplicate=False):
             "strength",
             "segment",
             "instance",
+            "dino_feat",
         ]
     if not duplicate:
         for key in data_dict["index_valid_keys"]:
@@ -875,6 +876,7 @@ class GridSample(object):
         key = self.hash(grid_coord)
         idx_sort = np.argsort(key)
         key_sort = key[idx_sort]
+
         _, inverse, count = np.unique(key_sort, return_inverse=True, return_counts=True)
         if self.mode == "train":  # train mode
             idx_select = (

@@ -17,7 +17,7 @@ from torch.nn.parallel import DistributedDataParallel
 import pointcept.utils.comm as comm
 from pointcept.utils.env import get_random_seed, set_seed
 from pointcept.utils.config import Config, DictAction
-
+import warnings
 
 def create_ddp_model(model, *, fp16_compression=False, **kwargs):
     """
@@ -110,7 +110,9 @@ def default_config_parser(file_path, options):
     if os.path.isfile(file_path):
         cfg = Config.fromfile(file_path)
     else:
+        warnings.warn(f"there might be at typo in {file_path}")
         sep = file_path.find("-")
+        
         cfg = Config.fromfile(os.path.join(file_path[:sep], file_path[sep + 1 :]))
 
     if options is not None:

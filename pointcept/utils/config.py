@@ -177,7 +177,10 @@ class Config:
 
     @staticmethod
     def _file2dict(filename, use_predefined_variables=True):
-        filename = osp.abspath(osp.expanduser(filename))
+        print(f"input file name for _file2dict {filename}")
+        # filename = osp.abspath(osp.expanduser(filename))
+        # filename = osp.abspath(filename)
+        print(f"_file2dict abs file {filename}")
         check_file_exist(filename)
         fileExtname = osp.splitext(filename)[1]
         if fileExtname not in [".py", ".json", ".yaml", ".yml"]:

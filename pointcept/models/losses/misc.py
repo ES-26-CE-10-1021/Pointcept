@@ -221,3 +221,45 @@ class DiceLoss(nn.Module):
                 total_loss += dice_loss
         loss = total_loss / num_classes
         return self.loss_weight * loss
+
+
+@LOSSES.register_module()
+class L1Loss(nn.Module):
+    def __init__(self, loss_weight=1):
+        """L1 Loss.
+        L1 Loss for per point regression
+        """
+        super(L1Loss, self).__init__()
+        self.loss_weight = loss_weight  
+
+
+    # def forward(self, pred, target, **kwargs):
+    #     # [B, C, d_1, d_2, ..., d_k] -> [C, B, d_1, d_2, ..., d_k]
+    #     print(f"pred shape in loss {pred.shape}")
+    #     print(f"target shape in loss {target.shape}")
+    #     pred = pred.transpose(0, 1)
+    #     # [C, B, d_1, d_2, ..., d_k] -> [C, N]
+    #     pred = pred.reshape(pred.size(0), -1)
+    #     # [C, N] -> [N, C]
+    #     pred = pred.transpose(0, 1).contiguous()
+    #     # (B, d_1, d_2, ..., d_k) --> (B * d_1 * d_2 * ... * d_k,)
+    #     target = target.view(-1).contiguous()
+    #     assert pred.size(0) == target.size(
+    #         0
+    #     ), "The shape of pred doesn't match the shape of target"
+    #
+    #
+    #     loss = torch.mean(torch.abs(pred - target)) * self.loss_weight 
+    #     return loss
+    def forward(self, pred, target, **kwargs):
+        pred = pred.transpose(0, 1)
+        pred = pred.reshape(pred.size(0), -1)
+        pred = pred.transpose(0, 1).contiguous()
+
+        pred = pred.squeeze(1)          # [N]
+        target = target.reshape(-1)     # [N]
+
+        assert pred.shape == target.shape
+
+        loss = F.l1_loss(pred, target) * self.loss_weight
+        return loss

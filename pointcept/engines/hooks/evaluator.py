@@ -787,3 +787,107 @@ class ObjDetEvaluator(HookBase):
         self.trainer.logger.info(
             "Best AP50: {:.2f}".format(self.trainer.best_metric_value)
         )
+
+
+
+
+@HOOKS.register_module()
+class RegressionEvaluator(HookBase):
+    def before_train(self):
+        if self.trainer.writer is not None and self.trainer.cfg.enable_wandb:
+            import wandb
+            wandb.define_metric("val/*", step_metric="Epoch")
+
+    def after_epoch(self):
+        if self.trainer.cfg.evaluate:
+            self.eval()
+
+    def eval(self):
+        self.trainer.logger.info(">>>>>>>>>>>>>>>> Start Regression Evaluation >>>>>>>>>>>>>>>>")
+        self.trainer.model.eval()
+
+        total_sq_error = 0.0
+        total_count = 0
+        total_loss = 0.0
+
+        for i, input_dict in enumerate(self.trainer.val_loader):
+            # move to GPU
+            for key in input_dict.keys():
+                if isinstance(input_dict[key], torch.Tensor):
+                    input_dict[key] = input_dict[key].cuda(non_blocking=True)
+
+            with torch.no_grad():
+                output_dict = self.trainer.model(input_dict)
+
+
+            pred = output_dict["reg_logits"].squeeze()
+
+            if "inverse" in input_dict:
+                pred = pred[input_dict["inverse"]]
+                target = input_dict["origin_strength"].reshape(-1)
+            else:
+                target = input_dict["strength"].reshape(-1)
+
+            # print("origin_strength:", input_dict["origin_strength"].shape)
+            # print("inverse:", input_dict["inverse"].shape)
+            # print("strength:", input_dict["strength"].shape)
+            # print("pred:" , output_dict["reg_logits"].shape)
+
+            # compute squared error
+            sq_error = (pred - target) ** 2
+
+            total_sq_error += sq_error.sum().item()
+            total_count += sq_error.numel()
+            total_loss += output_dict["loss"].item()
+
+            self.trainer.logger.info(
+                f"Val: [{i+1}/{len(self.trainer.val_loader)}] "
+                f"Loss {output_dict['loss'].item():.4f}"
+            )
+
+        # distributed sync
+        if comm.get_world_size() > 1:
+            total_sq_error = torch.tensor(total_sq_error).cuda()
+            total_count = torch.tensor(total_count).cuda()
+
+            dist.all_reduce(total_sq_error)
+            dist.all_reduce(total_count)
+
+            total_sq_error = total_sq_error.item()
+            total_count = total_count.item()
+
+        rmse = np.sqrt(total_sq_error / (total_count + 1e-10))
+        loss_avg = total_loss / len(self.trainer.val_loader)
+
+        self.trainer.logger.info(
+            f"Val result: RMSE {rmse:.4f}, Loss {loss_avg:.4f}"
+        )
+
+        current_epoch = self.trainer.epoch + 1
+
+        # tensorboard / wandb
+        if self.trainer.writer is not None:
+            self.trainer.writer.add_scalar("val/rmse", rmse, current_epoch)
+            self.trainer.writer.add_scalar("val/loss", loss_avg, current_epoch)
+
+            if self.trainer.cfg.enable_wandb:
+                import wandb
+                wandb.log(
+                    {
+                        "Epoch": current_epoch,
+                        "val/rmse": rmse,
+                        "val/loss": loss_avg,
+                    },
+                    step=wandb.run.step,
+                )
+
+        self.trainer.logger.info("<<<<<<<<<<<<<<<<< End Evaluation <<<<<<<<<<<<<<<<<")
+
+        # for checkpoint saver
+        self.trainer.comm_info["current_metric_value"] = rmse
+        self.trainer.comm_info["current_metric_name"] = "RMSE"
+
+    def after_train(self):
+        self.trainer.logger.info(
+            f"Best RMSE: {self.trainer.best_metric_value:.4f}"
+        )

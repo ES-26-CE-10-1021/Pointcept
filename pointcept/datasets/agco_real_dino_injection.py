@@ -7,7 +7,6 @@ from .defaults import DefaultDataset
 import open3d as o3d
 import matplotlib.pyplot as plt
 
-from sklearn.decomposition import PCA 
 
 @DATASETS.register_module()
 class AgcoRealDinoDataset(DefaultDataset):
@@ -16,10 +15,11 @@ class AgcoRealDinoDataset(DefaultDataset):
     Falls back to geometry-only if `use_dino=False`.
     """
 
-    def __init__(self, ignore_index=-1, use_dino=True, camera="left", **kwargs):
+    def __init__(self, ignore_index=-1, use_dino=True, camera="left", intensity_as_label = False, **kwargs):
         self.ignore_index = ignore_index
         self.use_dino = use_dino
         self.camera = camera  # "left" or "right"
+        self.use_intensity_as_label = intensity_as_label
         self.learning_map = self.get_learning_map(ignore_index)
         self.learning_map_inv = self.get_learning_map_inv(ignore_index)
         self.lidar_topic = "_ouster_points"
@@ -104,12 +104,22 @@ class AgcoRealDinoDataset(DefaultDataset):
         seg_dir = os.path.join(os.path.dirname(dir_path), "segment")
         seg_path = os.path.join(seg_dir, filename)
 
+        intensity_dir = os.path.join(os.path.dirname(dir_path), "intensity")
+        intensity_path = os.path.join(intensity_dir, filename)
+
         coord = np.load(coord_path).astype(np.float32)
         seg = np.load(seg_path).reshape(-1).astype(np.int32)
         seg = np.vectorize(self.learning_map.__getitem__)(seg).astype(np.int32)
+        intensity = np.load(intensity_path).astype(np.float32)
+
+        
+        assert coord.shape[0] == intensity.shape[0], "mismatch in coord and intensity"
+        assert coord.shape[0] == seg.shape[0], "mismatch in coord and segement"
+
 
         data_dict["coord"] = coord
         data_dict["segment"] = seg
+        data_dict["strength"] = intensity
 
 
         if self.use_dino:
@@ -124,6 +134,7 @@ class AgcoRealDinoDataset(DefaultDataset):
                 feats_3d, valid_mask = self.project_dino_features(coord, feats_2d)
                 data_dict['coord'] = coord[valid_mask]
                 data_dict['segment'] = seg[valid_mask]
+                data_dict['strength'] = intensity[valid_mask]
 
                 if False:
                     img_2d = np.load(img_file)
@@ -141,6 +152,13 @@ class AgcoRealDinoDataset(DefaultDataset):
 
                 # raise RuntimeError("test", feats_3d, feats_2d.shape, feats_3d.shape, coord.shape)
                 data_dict["dino_feat"] = feats_3d.astype(np.float32)
+                
+
+                # print("dataloader coord shape", data_dict['coord'].shape)
+                # print("dataloader segment shape", data_dict['segment'].shape)
+                # print("dataloader strength shape", data_dict['strength'].shape)
+                # print("dataloader dino feat shape", data_dict['dino_feat'].shape)
+
                 return data_dict
 
             else:

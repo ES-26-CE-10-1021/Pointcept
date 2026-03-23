@@ -60,6 +60,7 @@ class DefaultSegmentorV2(nn.Module):
             for p in self.backbone.parameters():
                 p.requires_grad = False
 
+
     def forward(self, input_dict, return_point=False):
         point = Point(input_dict)
         point = self.backbone(point)
@@ -336,3 +337,65 @@ class DefaultClassifier(nn.Module):
             return dict(loss=loss, cls_logits=cls_logits)
         else:
             return dict(cls_logits=cls_logits)
+
+@MODELS.register_module()
+class DefaultIntensityRegressor(nn.Module):
+    def __init__(
+        self,
+        backbone_out_channels,
+        backbone=None,
+        criteria=None,
+        freeze_backbone=False,
+    ):
+        super().__init__()
+
+        self.reg_head = nn.Sequential(
+            nn.Linear(backbone_out_channels, backbone_out_channels),
+            nn.ReLU(),
+            nn.Linear(backbone_out_channels, 1)
+        )
+        self.backbone = build_model(backbone)
+        self.criteria = build_criteria(criteria)
+        self.freeze_backbone = freeze_backbone
+        if self.freeze_backbone:
+            for p in self.backbone.parameters():
+                p.requires_grad = False
+
+
+    def forward(self, input_dict, return_point=False):
+        point = Point(input_dict)
+        point = self.backbone(point)
+ 
+        if isinstance(point, Point):
+            while "pooling_parent" in point.keys():
+                assert "pooling_inverse" in point.keys()
+                parent = point.pop("pooling_parent")
+                inverse = point.pop("pooling_inverse")
+                parent.feat = torch.cat([parent.feat, point.feat[inverse]], dim=-1)
+                point = parent
+            feat = point.feat
+        else:
+            feat = point
+
+        reg_logits = self.reg_head(feat)
+        return_dict = dict()
+        
+        if return_point:
+            # PCA evaluator parse feat and coord in point
+            return_dict["point"] = point
+        # train
+        if self.training:
+            loss = self.criteria(reg_logits, input_dict["strength"])
+            loss += 1e-3 * feat.mean()
+            return_dict["loss"] = loss
+        # eval
+        elif "strength" in input_dict.keys():
+            loss = self.criteria(reg_logits, input_dict["strength"])
+            return_dict["loss"] = loss
+            return_dict["reg_logits"] = reg_logits
+        # test
+        else:
+            return_dict["reg_logits"] = reg_logits
+        return return_dict
+
+

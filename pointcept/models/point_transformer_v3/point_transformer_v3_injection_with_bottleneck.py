@@ -1,3 +1,4 @@
+
 """
 Point Transformer - V3 Mode1
 
@@ -274,6 +275,7 @@ class Block(PointModule):
         upcast_softmax=True,
         dino_input_shape = 1280,
         use_dino = False,
+        dino_bottelneck = 1,
         use_dropout_on_dino = False,
     ):
         super().__init__()
@@ -284,9 +286,12 @@ class Block(PointModule):
         if self.use_dino:
             print("using dino")
             self.dino_projection = nn.Sequential(
-                    nn.Linear(dino_input_shape, out_features=channels, bias=True),
+                    nn.Linear(dino_input_shape, out_features=dino_bottelneck, bias=True),
+                    nn.GELU(),
+                    nn.Linear(dino_bottelneck, out_features=channels, bias=True),
                     nn.BatchNorm1d(channels),
                     nn.GELU(),
+
                     )
 
             self.feature_projection = nn.Sequential(
@@ -589,7 +594,7 @@ class Embedding(PointModule):
         return point
 
 
-@MODELS.register_module("PT-v3m1-injection")
+@MODELS.register_module("PT-v3m1-injection-bottleneck")
 class PointTransformerV3Injection(PointModule):
     def __init__(
         self,
