@@ -8,21 +8,21 @@ tests/test_3detr_cross_validation.py::TestConfigAudit):
   - loss_no_object_weight=0.2 (native default, not 0.25)
   - Matcher costs: giou=2, center=0, objectness=0 (native defaults)
   - 720 total epochs with cosine+warmup LR schedule (not 90 + OneCycleLR)
-  - batch_size=32 (8 per GPU on 4 GPUs, matching native's batchsize_per_gpu=8)
+  - batch_size=16 (8 per GPU on 2 GPUs, matching native's batchsize_per_gpu=8)
   - No AMP (native does not use mixed precision)
 
 The native paper uses 8x V100 GPUs (total batch=64). Adjust batch_size and
 num_worker when changing GPU count.
 
 Usage:
-    sh scripts/train.sh -d scannet -c det-3detr-v0m1-0-scannet -n 3detr_v0 -g 4
+    sh scripts/train.sh -d scannet -c det-3detr-v0m1-0-scannet -n 3detr_v0 -g 2
 """
 
 _base_ = ["../_base_/default_runtime.py"]
 
 # ── Training ─────────────────────────────────────────────────────────────────
 batch_size = 16      # total across all GPUs (8 per GPU on 2 GPUs)
-num_worker = 20      # total across all GPUs (4 per GPU)
+num_worker = 20      # total across all GPUs (10 per GPU on 2 GPUs)
 mix_prob = 0         # detection dataset does not support MixUp
 enable_amp = False   # native 3DETR does not use AMP
 find_unused_parameters = False

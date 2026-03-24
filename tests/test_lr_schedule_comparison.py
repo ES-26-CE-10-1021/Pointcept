@@ -51,11 +51,21 @@ def pointcept_schedule(total_steps, max_lr=5e-4, pct_start=0.05,
     )
 
     lrs, betas = [], []
-    for _ in range(total_steps):
-        lrs.append(optimizer.param_groups[0]["lr"])
-        betas.append(optimizer.param_groups[0]["betas"][0])
-        optimizer.step()
-        scheduler.step()
+    for step in range(total_steps):
+        # For all steps except the last, record LR/beta before stepping so that
+        # they correspond to the LR used for that optimizer step. For the final
+        # step, record after scheduler.step() so that the last element reflects
+        # the end-of-schedule LR.
+        if step < total_steps - 1:
+            lrs.append(optimizer.param_groups[0]["lr"])
+            betas.append(optimizer.param_groups[0]["betas"][0])
+            optimizer.step()
+            scheduler.step()
+        else:
+            optimizer.step()
+            scheduler.step()
+            lrs.append(optimizer.param_groups[0]["lr"])
+            betas.append(optimizer.param_groups[0]["betas"][0])
     return np.array(lrs), np.array(betas)
 
 
