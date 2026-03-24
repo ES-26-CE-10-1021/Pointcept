@@ -1429,10 +1429,10 @@ class ObjDetTester(TesterBase):
                     for cls_name in class_names:
                         ap_key = "{} Average Precision".format(cls_name)
                         rec_key = "{} Recall".format(cls_name)
-                        wandb_dict["test/AP25_{}".format(cls_name)] = metrics[0.25].get(ap_key, float("nan")) * 100
-                        wandb_dict["test/AP50_{}".format(cls_name)] = metrics[0.5].get(ap_key, float("nan")) * 100
-                        wandb_dict["test/Rec25_{}".format(cls_name)] = metrics[0.25].get(rec_key, float("nan")) * 100
-                        wandb_dict["test/Rec50_{}".format(cls_name)] = metrics[0.5].get(rec_key, float("nan")) * 100
+                        wandb_dict["test_finegrained/AP25_{}".format(cls_name)] = metrics[0.25].get(ap_key, float("nan")) * 100
+                        wandb_dict["test_finegrained/AP50_{}".format(cls_name)] = metrics[0.5].get(ap_key, float("nan")) * 100
+                        wandb_dict["test_finegrained/Rec25_{}".format(cls_name)] = metrics[0.25].get(rec_key, float("nan")) * 100
+                        wandb_dict["test_finegrained/Rec50_{}".format(cls_name)] = metrics[0.5].get(rec_key, float("nan")) * 100
                     wandb.log(wandb_dict)
 
         comm.synchronize()
