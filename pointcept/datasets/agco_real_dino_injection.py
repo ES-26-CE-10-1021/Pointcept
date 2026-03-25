@@ -7,7 +7,7 @@ from .defaults import DefaultDataset
 import open3d as o3d
 import matplotlib.pyplot as plt
 
-from sklearn.decomposition import PCA 
+# from sklearn.decomposition import PCA 
 
 @DATASETS.register_module()
 class AgcoRealDinoDataset(DefaultDataset):
@@ -100,6 +100,8 @@ class AgcoRealDinoDataset(DefaultDataset):
         data_dict = {}
         coord_path = self.data_list[idx % len(self.data_list)]
         dir_path, filename = os.path.split(coord_path)
+
+        data_dict["name"] = self.get_data_name(idx)
 
         seg_dir = os.path.join(os.path.dirname(dir_path), "segment")
         seg_path = os.path.join(seg_dir, filename)

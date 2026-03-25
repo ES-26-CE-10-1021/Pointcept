@@ -320,9 +320,10 @@ class Block(PointModule):
         )
 
     def forward(self, point: Point):
-        shortcut = point.feat
-        dino_feat = None
-        if self.use_dino:
+
+        # Dino feature injection (can be disabled at test time via disable_dino flag)
+        if self.use_dino and not getattr(self, "disable_dino", False):
+            dino_feat = None
             if "dino_feat" in point:
                 val = point["dino_feat"]
                 # Handle both tensor and Point-wrapped formats
@@ -339,21 +340,14 @@ class Block(PointModule):
                 # project into the same feature dimension as point.feat
                 projected_dino = self.dino_projection(dino_feat)
                 # fuse with current feature
-                
-                # print (shortcut.size(), point.feat.size(), projected_dino.size())
-                try:
-                    point.feat = shortcut + point.feat + projected_dino
-                except Exception as e:
-                    point.feat = shortcut + point.feat
+                point.feat = point.feat + projected_dino
 
-                    # print(e, shortcut.size(), point.feat.size(), projected_dino.size())
-        else:
-            # raise RuntimeError("no dino feat", point)
-            point.feat = shortcut + point.feat
-
-
+        # CPE with residual
+        shortcut = point.feat
         point = self.cpe(point)
-        # point.feat = shortcut + point.feat + self.dino_projection(dino_feat)
+        point.feat = shortcut + point.feat
+
+        # Attention with residual
         shortcut = point.feat
         if self.pre_norm:
             point = self.norm1(point)
@@ -362,6 +356,7 @@ class Block(PointModule):
         if not self.pre_norm:
             point = self.norm1(point)
 
+        # MLP with residual
         shortcut = point.feat
         if self.pre_norm:
             point = self.norm2(point)
@@ -369,6 +364,7 @@ class Block(PointModule):
         point.feat = shortcut + point.feat
         if not self.pre_norm:
             point = self.norm2(point)
+
         point.sparse_conv_feat = point.sparse_conv_feat.replace_feature(point.feat)
         return point
 
@@ -606,6 +602,7 @@ class PointTransformerV3Injection(PointModule):
         pdnorm_adaptive=False,
         pdnorm_affine=True,
         pdnorm_conditions=("ScanNet", "S3DIS", "Structured3D"),
+        disable_dino=False,
     ):
         super().__init__()
         self.num_stages = len(enc_depths)
@@ -754,25 +751,30 @@ class PointTransformerV3Injection(PointModule):
                     )
                 self.dec.add(module=dec, name=f"dec{s}")
 
+        # Optionally disable DINO injection at init (for test-time diagnostics)
+        if disable_dino:
+            self.set_dino_injection(enabled=False)
+
+    def set_dino_injection(self, enabled=True):
+        """Enable or disable DINO injection in all decoder blocks.
+        Useful for diagnostics: evaluate a trained checkpoint with DINO disabled
+        to check whether the backbone learned geometric features independently.
+        """
+        for module in self.dec.modules():
+            if isinstance(module, Block) and module.use_dino:
+                module.disable_dino = not enabled
+
     def forward(self, data_dict):
-        dino_feat = data_dict.get("dino_feat", None)
         point = Point(data_dict)
         point.serialization(order=self.order, shuffle_orders=self.shuffle_orders)
         point.sparsify()
 
         point = self.embedding(point)
+        # dino_feat flows through encoder pooling layers to match size of other feature dim
+        # dino_feat shouldn't affect the weights of the encoder as 'use_dino = False'
         point = self.enc(point)
         if not self.cls_mode:
-            # reattach before decoder (ensure it's on same device & dtype)
-            if dino_feat is not None:
-                # Convert numpy -> tensor if needed, and move to device
-                if not torch.is_tensor(dino_feat):
-                    dino_feat = torch.from_numpy(dino_feat)
-                dino_feat = dino_feat.to(point.feat.device)
-                # attach to point (will be visible to decoder Blocks)
-                point["dino_feat"] = dino_feat
-            else:
-                raise RuntimeError("no dino feat in data dict", data_dict)
+            # dino_feat is already at the correct resolution after being pooled through the encoder stages
             point = self.dec(point)
         # else:
         #     point.feat = torch_scatter.segment_csr(

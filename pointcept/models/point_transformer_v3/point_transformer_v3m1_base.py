@@ -316,9 +316,13 @@ class Block(PointModule):
         )
 
     def forward(self, point: Point):
+        
+        # CPE with residual
         shortcut = point.feat
         point = self.cpe(point)
         point.feat = shortcut + point.feat
+        
+        # Attention with residual
         shortcut = point.feat
         if self.pre_norm:
             point = self.norm1(point)
@@ -327,6 +331,7 @@ class Block(PointModule):
         if not self.pre_norm:
             point = self.norm1(point)
 
+        # MLP with residual
         shortcut = point.feat
         if self.pre_norm:
             point = self.norm2(point)
@@ -334,6 +339,7 @@ class Block(PointModule):
         point.feat = shortcut + point.feat
         if not self.pre_norm:
             point = self.norm2(point)
+        
         point.sparse_conv_feat = point.sparse_conv_feat.replace_feature(point.feat)
         return point
 

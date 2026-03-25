@@ -212,13 +212,12 @@ class DINOEnhancedSegmentor(nn.Module):
         backbone=None,
         criteria=None,
         freeze_backbone=False,
+        dino_feat_size=1280,
+        project_dino_feat=False,
+        normalize_dino_feat=False,
+        # gradual_dino_feat_weight=False, # TODO: Implement this
     ):
         super().__init__()
-        self.seg_head = (
-            nn.Linear(backbone_out_channels, num_classes)
-            if num_classes > 0
-            else nn.Identity()
-        )
         self.backbone = build_model(backbone) if backbone is not None else None
         self.criteria = build_criteria(criteria)
         self.freeze_backbone = freeze_backbone
@@ -226,8 +225,33 @@ class DINOEnhancedSegmentor(nn.Module):
             for p in self.backbone.parameters():
                 p.requires_grad = False
 
+        # Dino feat things
+        self.dino_feat_size = dino_feat_size
+        self.normalize_dino_feat = normalize_dino_feat
+        
+        # dino projection
+        self.project_dino_feat = project_dino_feat
+        if project_dino_feat:
+            self.dino_feat_projection = nn.Linear(dino_feat_size, backbone_out_channels)
+            seg_head_in = backbone_out_channels * 2
+        else:
+            seg_head_in = backbone_out_channels + dino_feat_size
+
+        # construct the segmentation head
+        self.seg_head = (
+            nn.Linear(seg_head_in, num_classes)
+            if num_classes > 0
+            else nn.Identity()
+        )
+        
+        # self.gradual_dino_feat_weight = gradual_dino_feat_weight # TODO: Implement a gradual weighting of dino features, 
+        #   should start very low and slowly approach 100% injection to allow the ptv3 backbone to learn on its own at the start, 
+        #   then slowly begin to lean using the dino features when it has some understanding of the 3d point clouds
+
     def forward(self, input_dict, return_point=False):
         point = Point(input_dict)
+        
+        # Forward pass on backbone
         if self.backbone is not None:
             if self.freeze_backbone:
                 with torch.no_grad():
@@ -247,12 +271,14 @@ class DINOEnhancedSegmentor(nn.Module):
             while "pooling_parent" in point.keys():
                 assert "pooling_inverse" in point.keys()
                 parent = point.pop("pooling_parent")
-                inverse = point.pooling_inverse
+                inverse = point.pop("pooling_inverse")
                 parent.feat = torch.cat([parent.feat, point.feat[inverse]], dim=-1)
                 point = parent
             feat = [point.feat]
         else:
             feat = []
+            
+        # Dino feature knn matching to pc points
         dino_coord = input_dict["dino_coord"]
         dino_feat = input_dict["dino_feat"]
         dino_offset = input_dict["dino_offset"]
@@ -263,9 +289,24 @@ class DINOEnhancedSegmentor(nn.Module):
             batch_y=offset2batch(point.origin_offset),
             k=1,
         )[1]
+        
+        # Normalize features for contatenation
+        if self.normalize_dino_feat:
+            dino_feat = nn.functional.normalize(dino_feat, p=2, dim=-1)
+            feat = [nn.functional.normalize(x, p=2, dim=-1) for x in feat]
 
-        feat.append(dino_feat[idx])
+        # Dino feature down projection injection
+        if self.project_dino_feat:
+            feat.append(self.dino_feat_projection(dino_feat[idx]))
+        
+        # Dino feature appending injection
+        else:
+            feat.append(dino_feat[idx])
+        
+        # Combine the backbone and dino features, feat = [(N,64),(N,1280)] -> feat = (N,1344)
         feat = torch.concatenate(feat, dim=-1)
+        
+        # Segmentation head
         seg_logits = self.seg_head(feat)
         return_dict = dict()
         if return_point:
