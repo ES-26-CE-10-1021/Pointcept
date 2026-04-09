@@ -37,5 +37,8 @@ from .scanobjectnn import (
 from .partnet import PartNetDataDataset
 from .partnete import PartNetEDataset
 
+# 3D object detection
+from .scannet_detection import ScanNetDetectionDataset
+
 # dataloader
 from .dataloader import MultiDatasetDataloader

@@ -663,19 +663,15 @@ class ShapeNetPartSegEvaluator(HookBase):
         )
         self.trainer.model.eval()
 
-        # Initialize numpy arrays to aggregate results over the entire validation set.
         num_categories = len(self.trainer.val_loader.dataset.categories)
         total_iou_category = torch.zeros(num_categories, device="cuda")
         total_iou_count = torch.zeros(num_categories, device="cuda")
 
-        # Iterate over all batches in the validation loader
         for i, input_dict in enumerate(self.trainer.val_loader):
-            # Move all tensor data to the GPU
             for key in input_dict.keys():
                 if isinstance(input_dict[key], torch.Tensor):
                     input_dict[key] = input_dict[key].cuda(non_blocking=True)
 
-            # Perform model forward pass without gradient computation
             with torch.no_grad():
                 output_dict = self.trainer.model(input_dict)
 
@@ -699,9 +695,7 @@ class ShapeNetPartSegEvaluator(HookBase):
                 if (torch.sum(segment == part_id) == 0) and (
                     torch.sum(pred_labels == part_id) == 0
                 ):
-                    parts_iou[k] = (
-                        1.0  # This part is correctly not predicted and not present
-                    )
+                    parts_iou[k] = 1.0
                 else:
                     intersection = torch.sum(
                         (segment == part_id) & (pred_labels == part_id)
@@ -709,10 +703,7 @@ class ShapeNetPartSegEvaluator(HookBase):
                     union = torch.sum((segment == part_id) | (pred_labels == part_id))
                     parts_iou[k] = intersection / (union + 1e-10)
 
-            # Calculate the mean IoU for this specific sample over its relevant parts
             sample_miou = parts_iou.mean()
-
-            # Aggregate the result into the corresponding category
             total_iou_category[cls_token] += sample_miou
             total_iou_count[cls_token] += 1
 
@@ -720,18 +711,14 @@ class ShapeNetPartSegEvaluator(HookBase):
             dist.all_reduce(total_iou_category), dist.all_reduce(total_iou_count)
         total_iou_count = total_iou_count.cpu().numpy()
         total_iou_category = total_iou_category.cpu().numpy()
-        # Instance-wise mIoU: average of all sample mIoUs
         ins_mIoU = total_iou_category.sum() / (total_iou_count.sum() + 1e-10)
-        # Category-wise mIoU: average of per-category mIoUs
         iou_per_cat = total_iou_category / (total_iou_count + 1e-10)
-        # Only average over categories that were actually present in the validation set
         cat_mIoU = np.mean(iou_per_cat[total_iou_count > 0])
 
         self.trainer.logger.info(
             "Val result: ins.mIoU/cat.mIoU {:.4f}/{:.4f}.".format(ins_mIoU, cat_mIoU)
         )
 
-        # Log detailed results for each category
         for i in range(num_categories):
             if total_iou_count[i] > 0:
                 self.trainer.logger.info(
@@ -769,15 +756,10 @@ class ShapeNetPartSegEvaluator(HookBase):
 
         self.trainer.logger.info("<<<<<<<<<<<<<<<<< End Evaluation <<<<<<<<<<<<<<<<<")
 
-        # Save the primary metric for checkpointing logic (e.g., saving the best model)
-        # Category mIoU is often a more robust metric for this.
         self.trainer.comm_info["current_metric_value"] = cat_mIoU
         self.trainer.comm_info["current_metric_name"] = "cat_mIoU"
 
     def after_train(self):
-        """
-        Log the best performing metric at the very end of training.
-        """
         self.trainer.logger.info(
             "Best {}: {:.4f}".format(
                 self.trainer.comm_info.get("current_metric_name", "metric"),
@@ -806,20 +788,16 @@ class PartNetEPartSegEvaluator(HookBase):
         )
         self.trainer.model.eval()
 
-        # Initialize numpy arrays to aggregate results over the entire validation set.
         num_categories = len(self.trainer.val_loader.dataset.categories)
         total_iou_parts = torch.zeros(self.num_parts, device="cuda")
         total_iou_count = torch.zeros(self.num_parts, device="cuda")
 
-        # Iterate over all batches in the validation loader
         for i, input_dict in enumerate(self.trainer.val_loader):
             assert len(input_dict["offset"]) == 1
-            # Move all tensor data to the GPU
             for key in input_dict.keys():
                 if isinstance(input_dict[key], torch.Tensor):
                     input_dict[key] = input_dict[key].cuda(non_blocking=True)
 
-            # Perform model forward pass without gradient computation
             with torch.no_grad():
                 output_dict = self.trainer.model(input_dict)
 
@@ -829,7 +807,6 @@ class PartNetEPartSegEvaluator(HookBase):
             category_name = self.trainer.val_loader.dataset.categories[cls_token]
             parts_idx = self.trainer.val_loader.dataset.category2part[category_name]
             pred_labels = torch.argmax(pred_scores, dim=-1)
-            # pred_labels = torch.argmax(pred_scores[:, parts_idx], dim=-1)
 
             if "inverse" in input_dict.keys():
                 assert (
@@ -864,12 +841,10 @@ class PartNetEPartSegEvaluator(HookBase):
         total_iou_parts = total_iou_parts.cpu().numpy()
         current_iou_count = total_iou_count[total_iou_count > 0]
         current_iou_parts = total_iou_parts[total_iou_count > 0]
-        # part-wise mIoU: average of all sample mIoUs
         part_mIoU = (current_iou_parts / current_iou_count).mean()
 
         self.trainer.logger.info("Val result: part mIoU {:.4f}.".format(part_mIoU))
 
-        # Log detailed results for each category
         for i in range(self.num_parts):
             if total_iou_count[i] > 0:
                 self.trainer.logger.info(
@@ -881,7 +856,6 @@ class PartNetEPartSegEvaluator(HookBase):
                     )
                 )
 
-        # --- Log metrics to TensorBoard / WandB ---
         current_epoch = self.trainer.epoch + 1
         if self.trainer.writer is not None:
             self.trainer.writer.add_scalar("val/part_mIoU", part_mIoU, current_epoch)
@@ -903,21 +877,181 @@ class PartNetEPartSegEvaluator(HookBase):
                             total_iou_parts[i] / total_iou_count[i],
                             current_epoch,
                         )
-                # (Similar logging block can be added for WandB if needed)
 
         self.trainer.logger.info("<<<<<<<<<<<<<<<<< End Evaluation <<<<<<<<<<<<<<<<<")
 
-        # Save the primary metric for checkpointing logic (e.g., saving the best model)
         self.trainer.comm_info["current_metric_value"] = part_mIoU
         self.trainer.comm_info["current_metric_name"] = "part_mIoU"
 
     def after_train(self):
-        """
-        Log the best performing metric at the very end of training.
-        """
         self.trainer.logger.info(
             "Best {}: {:.4f}".format(
                 self.trainer.comm_info.get("current_metric_name", "metric"),
                 self.trainer.best_metric_value,
             )
         )
+
+
+@HOOKS.register_module()
+class ObjDetEvaluator(HookBase):
+    """
+    Evaluation hook for 3D object detection (e.g. 3DETR) using AP25 / AP50.
+
+    Uses APCalculator from third_party/3detr to compute mean AP at IoU
+    thresholds 0.25 and 0.50. The primary metric reported to CheckpointSaver
+    is AP50.
+
+    Expected model output: dict with keys 'outputs' and 'aux_outputs'
+    (as returned by Model3DETRDetector in eval mode).
+
+    Config must set:
+        num_semcls (int): number of detection classes (default 18)
+        class_names (list[str]): ordered class name list
+    """
+
+    def after_epoch(self):
+        if self.trainer.cfg.evaluate:
+            self.eval()
+
+    def eval(self):
+        from pointcept.models.detection_3detr.dataset_config import _setup_3detr_path
+        _setup_3detr_path()
+        from utils.ap_calculator import APCalculator, get_ap_config_dict
+
+        self.trainer.logger.info(">>>>>>>>>>>>>>>> Start Detection Evaluation >>>>>>>>>>>>>>>>")
+        self.trainer.model.eval()
+
+        num_semcls = getattr(self.trainer.cfg, "num_semcls", 18)
+        class_names = getattr(
+            self.trainer.cfg, "class_names", [str(i) for i in range(num_semcls)]
+        )
+        class2type_map = {i: name for i, name in enumerate(class_names)}
+
+        class _SemClsProxy:
+            def __init__(self, n):
+                self.num_semcls = n
+
+        ap_config_dict = get_ap_config_dict(
+            remove_empty_box=True,
+            use_3d_nms=True,
+            nms_iou=0.25,
+            cls_nms=True,
+            per_class_proposal=True,
+            conf_thresh=0.05,
+            dataset_config=_SemClsProxy(num_semcls),
+        )
+        ap_calculator = APCalculator(
+            dataset_config=_SemClsProxy(num_semcls),
+            ap_iou_thresh=[0.25, 0.5],
+            class2type_map=class2type_map,
+            ap_config_dict=ap_config_dict,
+        )
+
+        total_loss = 0.0
+        num_batches = 0
+        for i, input_dict in enumerate(self.trainer.val_loader):
+            for key in input_dict.keys():
+                if isinstance(input_dict[key], torch.Tensor):
+                    input_dict[key] = input_dict[key].cuda(non_blocking=True)
+
+            with torch.no_grad():
+                self.trainer.model.train()
+                loss_out = self.trainer.model(input_dict)
+                self.trainer.model.eval()
+                output_dict = self.trainer.model(input_dict)
+
+            if "loss" in loss_out:
+                total_loss += loss_out["loss"].item()
+                num_batches += 1
+
+            ap_calculator.step_meter(output_dict, input_dict)
+
+            if (i + 1) % 50 == 0 or (i + 1) == len(self.trainer.val_loader):
+                self.trainer.logger.info(
+                    "Test: [{iter}/{max_iter}]".format(
+                        iter=i + 1, max_iter=len(self.trainer.val_loader)
+                    )
+                )
+
+        loss_avg = total_loss / max(num_batches, 1)
+
+        comm.synchronize()
+        all_pred = comm.gather(ap_calculator.pred_map_cls, dst=0)
+        all_gt = comm.gather(ap_calculator.gt_map_cls, dst=0)
+
+        if comm.is_main_process():
+            merged_pred, merged_gt, scan_cnt = {}, {}, 0
+            for pred_dict, gt_dict in zip(all_pred, all_gt):
+                for local_id in sorted(pred_dict.keys()):
+                    merged_pred[scan_cnt] = pred_dict[local_id]
+                    merged_gt[scan_cnt] = gt_dict[local_id]
+                    scan_cnt += 1
+            ap_calculator.pred_map_cls = merged_pred
+            ap_calculator.gt_map_cls = merged_gt
+
+            metrics = ap_calculator.compute_metrics()
+            ap25 = metrics[0.25]["mAP"] * 100
+            ap50 = metrics[0.5]["mAP"] * 100
+            ar25 = metrics[0.25].get("AR", float("nan")) * 100
+            ar50 = metrics[0.5].get("AR", float("nan")) * 100
+
+            self.trainer.logger.info(
+                "Val result: loss/AP25/AP50 {:.4f}/{:.2f}/{:.2f}".format(loss_avg, ap25, ap50)
+            )
+            self.trainer.logger.info(
+                "Val result: AR25/AR50 {:.2f}/{:.2f}".format(ar25, ar50)
+            )
+            for cls_name in class_names:
+                ap_key = "{} Average Precision".format(cls_name)
+                rec_key = "{} Recall".format(cls_name)
+                ap25_cls = metrics[0.25].get(ap_key, float("nan")) * 100
+                ap50_cls = metrics[0.5].get(ap_key, float("nan")) * 100
+                rec25_cls = metrics[0.25].get(rec_key, float("nan")) * 100
+                rec50_cls = metrics[0.5].get(rec_key, float("nan")) * 100
+                self.trainer.logger.info(
+                    "  {:20s}: AP25={:.2f}  AP50={:.2f}  Rec25={:.2f}  Rec50={:.2f}".format(
+                        cls_name, ap25_cls, ap50_cls, rec25_cls, rec50_cls
+                    )
+                )
+
+            current_epoch = self.trainer.epoch + 1
+            if self.trainer.writer is not None:
+                self.trainer.writer.add_scalar("val/loss", loss_avg, current_epoch)
+                self.trainer.writer.add_scalar("val/AP25", ap25, current_epoch)
+                self.trainer.writer.add_scalar("val/AP50", ap50, current_epoch)
+                self.trainer.writer.add_scalar("val/AR25", ar25, current_epoch)
+                self.trainer.writer.add_scalar("val/AR50", ar50, current_epoch)
+                for cls_name in class_names:
+                    ap_key = "{} Average Precision".format(cls_name)
+                    rec_key = "{} Recall".format(cls_name)
+                    self.trainer.writer.add_scalar("val_finegrained/AP25_{}".format(cls_name), metrics[0.25].get(ap_key, float("nan")) * 100, current_epoch)
+                    self.trainer.writer.add_scalar("val_finegrained/AP50_{}".format(cls_name), metrics[0.5].get(ap_key, float("nan")) * 100, current_epoch)
+                    self.trainer.writer.add_scalar("val_finegrained/Rec25_{}".format(cls_name), metrics[0.25].get(rec_key, float("nan")) * 100, current_epoch)
+                    self.trainer.writer.add_scalar("val_finegrained/Rec50_{}".format(cls_name), metrics[0.5].get(rec_key, float("nan")) * 100, current_epoch)
+                if self.trainer.cfg.enable_wandb:
+                    wandb_dict = {
+                        "Epoch": current_epoch,
+                        "val/loss": loss_avg,
+                        "val/AP25": ap25,
+                        "val/AP50": ap50,
+                        "val/AR25": ar25,
+                        "val/AR50": ar50,
+                    }
+                    for cls_name in class_names:
+                        ap_key = "{} Average Precision".format(cls_name)
+                        rec_key = "{} Recall".format(cls_name)
+                        wandb_dict["val_finegrained/AP25_{}".format(cls_name)] = metrics[0.25].get(ap_key, float("nan")) * 100
+                        wandb_dict["val_finegrained/AP50_{}".format(cls_name)] = metrics[0.5].get(ap_key, float("nan")) * 100
+                        wandb_dict["val_finegrained/Rec25_{}".format(cls_name)] = metrics[0.25].get(rec_key, float("nan")) * 100
+                        wandb_dict["val_finegrained/Rec50_{}".format(cls_name)] = metrics[0.5].get(rec_key, float("nan")) * 100
+                    wandb.log(wandb_dict, step=wandb.run.step)
+
+            self.trainer.logger.info("<<<<<<<<<<<<<<<<< End Detection Evaluation <<<<<<<<<<<<<<<<<")
+            self.trainer.comm_info["current_metric_value"] = ap50
+            self.trainer.comm_info["current_metric_name"] = "AP50"
+
+    def after_train(self):
+        self.trainer.logger.info(
+            "Best AP50: {:.2f}".format(self.trainer.best_metric_value)
+        )
+

@@ -1,0 +1,7 @@
+[submodule "third_party/3detr"]
+	path = third_party/3detr
+	url = git@github.com:ES-26-CE-10-1021/3detr.git
+	branch = dev
+[submodule "third_party/slurm_scripts"]
+	path = third_party/slurm_scripts
+	url = git@github.com:ES-26-CE-10-1021/slurm_scripts.git

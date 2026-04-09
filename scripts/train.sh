@@ -85,6 +85,9 @@ else
   RESUME=false
   mkdir -p "$MODEL_DIR" "$CODE_DIR"
   cp -r scripts tools pointcept "$CODE_DIR"
+  rsync -a --exclude='outputs' --exclude='runs' --exclude='logs' \
+            --exclude='__pycache__' --exclude='slurm' \
+            third_party/ "$CODE_DIR/third_party/"
 fi
 
 echo "Loading config in:" $CONFIG_DIR

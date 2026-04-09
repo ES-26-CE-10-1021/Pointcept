@@ -1554,3 +1554,52 @@ class ImgAugmentation(object):
         correspondence[mask] -= np.array(self.crop_start)
         point["correspondence"] = correspondence.reshape(correspondence_shape)
         return point
+
+
+@TRANSFORMS.register_module()
+class LimitMaxPoints(object):
+    def __init__(self, max_points):
+        self.max_points = max_points
+
+    def __call__(self, data_dict):
+        coord_ = data_dict["coord"]
+        segment_ = data_dict["segment"]
+
+        if coord_.shape[0] > self.max_points:
+            indices = np.random.choice(coord_.shape[0], self.max_points, replace=False)
+            coord = coord_[indices]
+            segment = segment_[indices]
+        else:
+            coord = coord_
+            segment = segment_
+
+        data_dict["coord"] = coord.astype(coord_.dtype)
+        data_dict["segment"] = segment.astype(segment_.dtype)
+
+        return data_dict
+
+
+@TRANSFORMS.register_module()
+class AssertDinoFeat(object):
+    def __init__(self) -> None:
+        pass
+    def __call__(self, data_dict):
+        print(data_dict.keys())
+        assert "dino_feat" in data_dict.keys()
+
+        for key in data_dict.keys():
+            print(f"{key} {data_dict[key].shape}")
+
+        return data_dict
+
+class Compose(object):
+    def __init__(self, cfg=None):
+        self.cfg = cfg if cfg is not None else []
+        self.transforms = []
+        for t_cfg in self.cfg:
+            self.transforms.append(TRANSFORMS.build(t_cfg))
+
+    def __call__(self, data_dict):
+        for t in self.transforms:
+            data_dict = t(data_dict)
+        return data_dict
