@@ -21,8 +21,8 @@ Usage:
 _base_ = ["../_base_/default_runtime.py"]
 
 # ── Training ─────────────────────────────────────────────────────────────────
-batch_size = 16      # total across all GPUs (8 per GPU on 2 GPUs)
-num_worker = 20      # total across all GPUs (10 per GPU on 2 GPUs)
+batch_size = 8      # total across all GPUs (8 per GPU on 2 GPUs)
+num_worker = 16      # total across all GPUs (10 per GPU on 2 GPUs)
 mix_prob = 0         # detection dataset does not support MixUp
 enable_amp = False   # native 3DETR does not use AMP
 find_unused_parameters = False
@@ -95,13 +95,13 @@ model = dict(
 #   Phase 1 (1.25%): lr ramps from 5e-4/500=1e-6 to 5e-4  (matches warm_lr → base_lr)
 #   Phase 2 (98.75%): lr decays from 5e-4 to 5e-4/500=1e-6 (matches base_lr → final_lr)
 epoch = 720
-eval_epoch = 10
+eval_epoch = 20
 
 optimizer = dict(type="AdamW", lr=5e-4, weight_decay=0.1)
 scheduler = dict(
     type="OneCycleLR",
     max_lr=[5e-4],
-    pct_start=0.0125,          # 9/720 = 1.25% warmup (native: warm_lr_epochs=9)
+    pct_start=0.05,          # 9/720 = 1.25% warmup (native: warm_lr_epochs=9)
     anneal_strategy="cos",
     div_factor=500.0,          # initial_lr = 5e-4 / 500 = 1e-6 (native: warm_lr)
     final_div_factor=1.0,      # final_lr = 5e-4 / 500 = 1e-6 (native: final_lr)

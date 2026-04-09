@@ -1,11 +1,18 @@
 """
 3DETR on ScanNet — 3D Object Detection (18 classes, axis-aligned boxes)
 
-Modified 3DETR with PTv3 encoder + Vanilla 3DETR transformer decoder
-Trained on ScanNet detection data (VoteNet-style pre-processed format).
+v4m1-0: PTv3 pre-encoder + FPS downsampling (2048 pts) + VanillaTransformerEncoder
+        + 3DETR decoder.
+
+Key changes from v3:
+  - FPS after PTv3 encoding selects 2048 spatially well-distributed points,
+    producing fixed-length output (no padding mask needed).
+  - Output dim reduced to 256 (enc_channels[-1]=256) to match decoder_dim,
+    eliminating the dimension mismatch in encoder_to_decoder_projection.
+  - No padding_mask means BatchNorm in the projection is safe.
 
 Usage:
-    sh scripts/train.sh -d scannet -c det-3detr-v2m1-0-scannet -n my_3detr_exp_2 -g 4
+    sh scripts/train.sh -d scannet -c det-3detr-v4m1-0-scannet -n 3detr_ptv3_fps -g 4
 
 Data:
     Update `data_root` and `meta_data_dir` to point to your
@@ -25,16 +32,17 @@ clip_grad = 0.1
 # ── Model ─────────────────────────────────────────────────────────────────────
 model = dict(
     type="Model3DETRDetector",
-    # PTv3 Encoder
+    # PTv3 Encoder with FPS downsampling
     pre_encoder=dict(
         type="PTv3PreEncoder",
         grid_size=0.02,
+        npoint=2048,       # FPS downsample to fixed 2048 points after PTv3
         in_channels=3,
         order=("z", "z-trans", "hilbert", "hilbert-trans"),
         stride=(2, 2, 2, 2),
         enc_depths=(2, 2, 2, 6, 2),
-        enc_channels=(32, 64, 128, 256, 512),
-        enc_num_head=(2, 4, 8, 16, 32),
+        enc_channels=(32, 64, 128, 256, 256),   # last stage 256 to match decoder_dim
+        enc_num_head=(2, 4, 8, 16, 16),         # head_dim=16 throughout
         enc_patch_size=(1024, 1024, 1024, 1024, 1024),
         mlp_ratio=4,
         qkv_bias=True,
@@ -55,9 +63,15 @@ model = dict(
         pdnorm_affine=True,
         pdnorm_conditions=("ScanNet", "S3DIS", "Structured3D"),
     ),
-    # Identity mapping (placeholder for skipping)
+    # Vanilla Transformer encoder (no masking / downsampling)
     encoder=dict(
-        type="IdentityEncoder3DETR",
+        type="VanillaTransformerEncoder3DETR",
+        encoder_dim=256,   # matches enc_channels[-1]
+        nhead=4,
+        nlayers=3,
+        ffn_dim=128,
+        dropout=0.1,
+        activation="relu",
     ),
     # Cross-attention decoder for box queries
     decoder=dict(
@@ -70,7 +84,7 @@ model = dict(
     ),
     # ScanNet dataset metadata (class count, box parametrisation, etc.)
     dataset_config=dict(type="ScanNetDetectionConfig"),
-    encoder_dim=512,   # must match enc_channels[-1]; encoder_to_decoder_projection handles 512->256
+    encoder_dim=256,   # matches enc_channels[-1] and decoder_dim — projection is 256→256
     decoder_dim=256,
     num_queries=256,
     position_embedding="fourier",

@@ -181,6 +181,9 @@ class Model3DETRDetector(nn.Module):
         position_embedding (str): 'fourier' or 'sine'.
         mlp_dropout (float): dropout in prediction MLP heads.
         criterion (dict): config for SetCriterion3DETR loss.
+        projection_norm (str): norm for encoder_to_decoder_projection.
+            'bn1d' (default, original 3DETR), 'ln' (LayerNorm, padding-safe),
+            or 'bn1d_masked' (BN with padded positions zeroed before/after).
     """
 
     def __init__(
@@ -196,6 +199,7 @@ class Model3DETRDetector(nn.Module):
         mlp_dropout=0.3,
         criterion=None,
         input_feature_dim=0,
+        projection_norm="bn1d",
     ):
         super().__init__()
 
@@ -223,11 +227,16 @@ class Model3DETRDetector(nn.Module):
             hidden_dims = [encoder_dim]
         else:
             hidden_dims = [encoder_dim, encoder_dim]
+        # 'bn1d_masked' uses bn1d in the MLP but zeros padded positions
+        # before and after the projection in forward() to prevent padding
+        # from corrupting BatchNorm statistics.
+        self._projection_masked_bn = projection_norm == "bn1d_masked"
+        mlp_norm = "bn1d" if self._projection_masked_bn else projection_norm
         self.encoder_to_decoder_projection = GenericMLP(
             input_dim=encoder_dim,
             hidden_dims=hidden_dims,
             output_dim=decoder_dim,
-            norm_fn_name="bn1d",
+            norm_fn_name=mlp_norm,
             activation="relu",
             use_conv=True,
             output_use_activation=True,
@@ -465,9 +474,18 @@ class Model3DETRDetector(nn.Module):
         enc_xyz, enc_features, enc_inds, padding_mask = self.run_encoder(
             point_clouds
         )
-        enc_features = self.encoder_to_decoder_projection(
-            enc_features.permute(1, 2, 0)
-        ).permute(2, 0, 1)
+        # enc_features: (N', B, C) → (B, C, N') for projection
+        proj_input = enc_features.permute(1, 2, 0)
+        if self._projection_masked_bn and padding_mask is not None:
+            # Zero padded positions before BN so they don't corrupt statistics.
+            # mask: (B, N') → (B, 1, N') broadcast over channels.
+            real_mask = (~padding_mask).unsqueeze(1).float()
+            proj_input = proj_input * real_mask
+        enc_features = self.encoder_to_decoder_projection(proj_input)
+        if self._projection_masked_bn and padding_mask is not None:
+            # Re-zero after projection (BN bias term may have added values).
+            enc_features = enc_features * real_mask
+        enc_features = enc_features.permute(2, 0, 1)
 
         if encoder_only:
             return enc_xyz, enc_features.transpose(0, 1)

@@ -1,11 +1,14 @@
 """
 3DETR on ScanNet — 3D Object Detection (18 classes, axis-aligned boxes)
 
-Modified 3DETR with PTv3 encoder + Vanilla 3DETR transformer decoder
-Trained on ScanNet detection data (VoteNet-style pre-processed format).
+v3m1-2: PTv3 pre-encoder + VanillaTransformerEncoder + 3DETR decoder.
+Fix: Masked BatchNorm in encoder_to_decoder_projection — zeros padded positions
+before and after BN so they don't corrupt running statistics or feature scaling.
+
+Baseline: det-3detr-v3m1-0-scannet.py (same architecture, default BN projection)
 
 Usage:
-    sh scripts/train.sh -d scannet -c det-3detr-v2m1-0-scannet -n my_3detr_exp_2 -g 4
+    sh scripts/train.sh -d scannet -c det-3detr-v3m1-2-scannet -n 3detr_ptv3_enc_mbn -g 4
 
 Data:
     Update `data_root` and `meta_data_dir` to point to your
@@ -55,9 +58,15 @@ model = dict(
         pdnorm_affine=True,
         pdnorm_conditions=("ScanNet", "S3DIS", "Structured3D"),
     ),
-    # Identity mapping (placeholder for skipping)
+    # Vanilla Transformer encoder (no masking / downsampling)
     encoder=dict(
-        type="IdentityEncoder3DETR",
+        type="VanillaTransformerEncoder3DETR",
+        encoder_dim=512,   # must match enc_channels[-1] from PTv3
+        nhead=4,
+        nlayers=3,
+        ffn_dim=128,
+        dropout=0.1,
+        activation="relu",
     ),
     # Cross-attention decoder for box queries
     decoder=dict(
@@ -75,6 +84,7 @@ model = dict(
     num_queries=256,
     position_embedding="fourier",
     mlp_dropout=0.3,
+    projection_norm="bn1d_masked",  # Masked BN fix: zeros padded positions before/after BN
     # Detection criterion (Hungarian matching + weighted box losses)
     criterion=dict(
         type="SetCriterion3DETR",
