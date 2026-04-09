@@ -1,7 +1,7 @@
 """
 Evaluate Hook
 
-Author: Xiaoyang Wu (xiaoyang.wu.cs@gmail.com)
+Author: Xiaoyang Wu (xiaoyang.wu.cs@gmail.com), Yujia Zhang (yujia.zhang.cs@gmail.com)
 Please cite our work if the code is helpful to you.
 """
 
@@ -645,6 +645,254 @@ class InsSegEvaluator(HookBase):
 
 
 @HOOKS.register_module()
+class ShapeNetPartSegEvaluator(HookBase):
+    def __init__(self, write_cls_iou=False):
+        self.write_cls_iou = write_cls_iou
+
+    def before_train(self):
+        if self.trainer.writer is not None and self.trainer.cfg.enable_wandb:
+            wandb.define_metric("val/*", step_metric="Epoch")
+
+    def after_epoch(self):
+        if self.trainer.cfg.evaluate:
+            self.eval()
+
+    def eval(self):
+        self.trainer.logger.info(
+            ">>>>>>>>>>>>>>>> Start Part Segmentation Evaluation >>>>>>>>>>>>>>>>"
+        )
+        self.trainer.model.eval()
+
+        num_categories = len(self.trainer.val_loader.dataset.categories)
+        total_iou_category = torch.zeros(num_categories, device="cuda")
+        total_iou_count = torch.zeros(num_categories, device="cuda")
+
+        for i, input_dict in enumerate(self.trainer.val_loader):
+            for key in input_dict.keys():
+                if isinstance(input_dict[key], torch.Tensor):
+                    input_dict[key] = input_dict[key].cuda(non_blocking=True)
+
+            with torch.no_grad():
+                output_dict = self.trainer.model(input_dict)
+
+            pred_scores = output_dict["seg_logits"]
+            pred_labels = torch.argmax(pred_scores, dim=-1)
+
+            segment = input_dict["segment"]
+            cls_token = input_dict["cls_token"][0].cpu().numpy()
+
+            if "inverse" in input_dict.keys():
+                assert (
+                    "origin_segment" in input_dict.keys()
+                ), "origin_segment must be provided with inverse"
+                pred_labels = pred_labels[input_dict["inverse"]]
+                segment = input_dict["origin_segment"]
+
+            category_name = self.trainer.val_loader.dataset.categories[cls_token]
+            parts_idx = self.trainer.val_loader.dataset.category2part[category_name]
+            parts_iou = torch.zeros(len(parts_idx), device="cuda")
+            for k, part_id in enumerate(parts_idx):
+                if (torch.sum(segment == part_id) == 0) and (
+                    torch.sum(pred_labels == part_id) == 0
+                ):
+                    parts_iou[k] = 1.0
+                else:
+                    intersection = torch.sum(
+                        (segment == part_id) & (pred_labels == part_id)
+                    )
+                    union = torch.sum((segment == part_id) | (pred_labels == part_id))
+                    parts_iou[k] = intersection / (union + 1e-10)
+
+            sample_miou = parts_iou.mean()
+            total_iou_category[cls_token] += sample_miou
+            total_iou_count[cls_token] += 1
+
+        if comm.get_world_size() > 1:
+            dist.all_reduce(total_iou_category), dist.all_reduce(total_iou_count)
+        total_iou_count = total_iou_count.cpu().numpy()
+        total_iou_category = total_iou_category.cpu().numpy()
+        ins_mIoU = total_iou_category.sum() / (total_iou_count.sum() + 1e-10)
+        iou_per_cat = total_iou_category / (total_iou_count + 1e-10)
+        cat_mIoU = np.mean(iou_per_cat[total_iou_count > 0])
+
+        self.trainer.logger.info(
+            "Val result: ins.mIoU/cat.mIoU {:.4f}/{:.4f}.".format(ins_mIoU, cat_mIoU)
+        )
+
+        for i in range(num_categories):
+            if total_iou_count[i] > 0:
+                self.trainer.logger.info(
+                    "Class_{idx}-{name} Result: iou_cat/num_sample {iou_cat:.4f}/{iou_count:.0f}".format(
+                        idx=i,
+                        name=self.trainer.val_loader.dataset.categories[i],
+                        iou_cat=iou_per_cat[i],
+                        iou_count=total_iou_count[i],
+                    )
+                )
+
+        current_epoch = self.trainer.epoch + 1
+        if self.trainer.writer is not None:
+            self.trainer.writer.add_scalar("val/ins_mIoU", ins_mIoU, current_epoch)
+            self.trainer.writer.add_scalar("val/cat_mIoU", cat_mIoU, current_epoch)
+            if self.trainer.cfg.enable_wandb:
+                wandb.log(
+                    {
+                        "Epoch": current_epoch,
+                        "val/ins_mIoU": ins_mIoU,
+                        "val/cat_mIoU": cat_mIoU,
+                    },
+                    step=wandb.run.step,
+                )
+
+            if self.write_cls_iou:
+                for i in range(num_categories):
+                    if total_iou_count[i] > 0:
+                        category_name = self.trainer.val_loader.dataset.categories[i]
+                        self.trainer.writer.add_scalar(
+                            f"val/cls_{i}-{category_name}_IoU",
+                            iou_per_cat[i],
+                            current_epoch,
+                        )
+
+        self.trainer.logger.info("<<<<<<<<<<<<<<<<< End Evaluation <<<<<<<<<<<<<<<<<")
+
+        self.trainer.comm_info["current_metric_value"] = cat_mIoU
+        self.trainer.comm_info["current_metric_name"] = "cat_mIoU"
+
+    def after_train(self):
+        self.trainer.logger.info(
+            "Best {}: {:.4f}".format(
+                self.trainer.comm_info.get("current_metric_name", "metric"),
+                self.trainer.best_metric_value,
+            )
+        )
+
+
+@HOOKS.register_module()
+class PartNetEPartSegEvaluator(HookBase):
+    def __init__(self, num_parts=None, write_part_iou=False):
+        self.num_parts = sum(num_parts)
+        self.write_part_iou = write_part_iou
+
+    def before_train(self):
+        if self.trainer.writer is not None and self.trainer.cfg.enable_wandb:
+            wandb.define_metric("val/*", step_metric="Epoch")
+
+    def after_epoch(self):
+        if self.trainer.cfg.evaluate:
+            self.eval()
+
+    def eval(self):
+        self.trainer.logger.info(
+            ">>>>>>>>>>>>>>>> Start Part Segmentation Evaluation >>>>>>>>>>>>>>>>"
+        )
+        self.trainer.model.eval()
+
+        num_categories = len(self.trainer.val_loader.dataset.categories)
+        total_iou_parts = torch.zeros(self.num_parts, device="cuda")
+        total_iou_count = torch.zeros(self.num_parts, device="cuda")
+
+        for i, input_dict in enumerate(self.trainer.val_loader):
+            assert len(input_dict["offset"]) == 1
+            for key in input_dict.keys():
+                if isinstance(input_dict[key], torch.Tensor):
+                    input_dict[key] = input_dict[key].cuda(non_blocking=True)
+
+            with torch.no_grad():
+                output_dict = self.trainer.model(input_dict)
+
+            pred_scores = output_dict["seg_logits"]
+            segment = input_dict["segment"]
+            cls_token = input_dict["cls_token"][0].cpu().numpy()
+            category_name = self.trainer.val_loader.dataset.categories[cls_token]
+            parts_idx = self.trainer.val_loader.dataset.category2part[category_name]
+            pred_labels = torch.argmax(pred_scores, dim=-1)
+
+            if "inverse" in input_dict.keys():
+                assert (
+                    "origin_segment" in input_dict.keys()
+                ), "origin_segment must be provided with inverse"
+                pred_labels = pred_labels[input_dict["inverse"]]
+                segment = input_dict["origin_segment"]
+
+            for k, part_id in enumerate(parts_idx):
+                if k == 0:
+                    continue
+                if (segment == part_id).sum() == 0:
+                    continue
+                if (torch.sum(segment == part_id) == 0) and (
+                    torch.sum(pred_labels == part_id) == 0
+                ):
+                    continue
+                else:
+                    intersection = torch.sum(
+                        (segment == part_id) & (pred_labels == part_id)
+                    )
+                    union = torch.sum((segment == part_id) | (pred_labels == part_id))
+                    total_iou_parts[
+                        k + self.trainer.val_loader.dataset.num_part_offset[cls_token]
+                    ] += intersection / (union + 1e-10)
+                    total_iou_count[
+                        k + self.trainer.val_loader.dataset.num_part_offset[cls_token]
+                    ] += 1
+        if comm.get_world_size() > 1:
+            dist.all_reduce(total_iou_parts), dist.all_reduce(total_iou_count)
+        total_iou_count = total_iou_count.cpu().numpy()
+        total_iou_parts = total_iou_parts.cpu().numpy()
+        current_iou_count = total_iou_count[total_iou_count > 0]
+        current_iou_parts = total_iou_parts[total_iou_count > 0]
+        part_mIoU = (current_iou_parts / current_iou_count).mean()
+
+        self.trainer.logger.info("Val result: part mIoU {:.4f}.".format(part_mIoU))
+
+        for i in range(self.num_parts):
+            if total_iou_count[i] > 0:
+                self.trainer.logger.info(
+                    "Class_{idx}-{name} Result: iou_part/num_sample {iou_part:.4f}/{iou_count:.0f}".format(
+                        idx=i,
+                        name=self.trainer.val_loader.dataset.parts[i],
+                        iou_part=total_iou_parts[i] / total_iou_count[i],
+                        iou_count=total_iou_count[i],
+                    )
+                )
+
+        current_epoch = self.trainer.epoch + 1
+        if self.trainer.writer is not None:
+            self.trainer.writer.add_scalar("val/part_mIoU", part_mIoU, current_epoch)
+            if self.trainer.cfg.enable_wandb:
+                wandb.log(
+                    {
+                        "Epoch": current_epoch,
+                        "val/part_mIoU": part_mIoU,
+                    },
+                    step=wandb.run.step,
+                )
+
+            if self.write_part_iou:
+                for i in range(self.num_parts):
+                    if total_iou_count[i] > 0:
+                        part_name = self.trainer.val_loader.dataset.parts[i]
+                        self.trainer.writer.add_scalar(
+                            f"val/part_{i}-{part_name}_IoU",
+                            total_iou_parts[i] / total_iou_count[i],
+                            current_epoch,
+                        )
+
+        self.trainer.logger.info("<<<<<<<<<<<<<<<<< End Evaluation <<<<<<<<<<<<<<<<<")
+
+        self.trainer.comm_info["current_metric_value"] = part_mIoU
+        self.trainer.comm_info["current_metric_name"] = "part_mIoU"
+
+    def after_train(self):
+        self.trainer.logger.info(
+            "Best {}: {:.4f}".format(
+                self.trainer.comm_info.get("current_metric_name", "metric"),
+                self.trainer.best_metric_value,
+            )
+        )
+
+
+@HOOKS.register_module()
 class ObjDetEvaluator(HookBase):
     """
     Evaluation hook for 3D object detection (e.g. 3DETR) using AP25 / AP50.
@@ -679,13 +927,12 @@ class ObjDetEvaluator(HookBase):
         )
         class2type_map = {i: name for i, name in enumerate(class_names)}
 
-        # Provide a minimal proxy so per_class_proposal works without a full dataset object
         class _SemClsProxy:
             def __init__(self, n):
                 self.num_semcls = n
 
         ap_config_dict = get_ap_config_dict(
-            remove_empty_box=True,    # exact_eval=True, matches native 3DETR evaluate()
+            remove_empty_box=True,
             use_3d_nms=True,
             nms_iou=0.25,
             cls_nms=True,
@@ -693,7 +940,6 @@ class ObjDetEvaluator(HookBase):
             conf_thresh=0.05,
             dataset_config=_SemClsProxy(num_semcls),
         )
-        # Single calculator handles both IoU thresholds in one pass
         ap_calculator = APCalculator(
             dataset_config=_SemClsProxy(num_semcls),
             ap_iou_thresh=[0.25, 0.5],
@@ -718,7 +964,6 @@ class ObjDetEvaluator(HookBase):
                 total_loss += loss_out["loss"].item()
                 num_batches += 1
 
-            # step_meter handles both parse_predictions and make_gt_list internally
             ap_calculator.step_meter(output_dict, input_dict)
 
             if (i + 1) % 50 == 0 or (i + 1) == len(self.trainer.val_loader):
@@ -730,13 +975,11 @@ class ObjDetEvaluator(HookBase):
 
         loss_avg = total_loss / max(num_batches, 1)
 
-        # Gather per-GPU accumulated results to rank 0 before computing metrics
         comm.synchronize()
         all_pred = comm.gather(ap_calculator.pred_map_cls, dst=0)
         all_gt = comm.gather(ap_calculator.gt_map_cls, dst=0)
 
         if comm.is_main_process():
-            # Merge per-GPU dicts, re-keying to avoid index collisions
             merged_pred, merged_gt, scan_cnt = {}, {}, 0
             for pred_dict, gt_dict in zip(all_pred, all_gt):
                 for local_id in sorted(pred_dict.keys()):
@@ -746,9 +989,7 @@ class ObjDetEvaluator(HookBase):
             ap_calculator.pred_map_cls = merged_pred
             ap_calculator.gt_map_cls = merged_gt
 
-            # compute_metrics() returns {iou_thresh: {"mAP": float, "<cls> Average Precision": float, ...}}
             metrics = ap_calculator.compute_metrics()
-            # compute_metrics() returns values in [0, 1]; multiply by 100 for display
             ap25 = metrics[0.25]["mAP"] * 100
             ap50 = metrics[0.5]["mAP"] * 100
             ar25 = metrics[0.25].get("AR", float("nan")) * 100
@@ -813,3 +1054,4 @@ class ObjDetEvaluator(HookBase):
         self.trainer.logger.info(
             "Best AP50: {:.2f}".format(self.trainer.best_metric_value)
         )
+
