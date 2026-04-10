@@ -55,3 +55,46 @@ class PTv3PreEncoder(PointTransformerV3):
         point = self.embedding(point)
         point = self.enc(point)
         return point
+
+
+@MODULES.register_module("PTv3UNetPreEncoder")
+class PTv3UNetPreEncoder(PointTransformerV3):
+    """PTv3 with full U-Net (encoder + decoder) as a 3DETR pre-encoder.
+
+    Unlike PTv3PreEncoder (encoder-only, coarse output), this runs the
+    full U-Net so the 3DETR decoder cross-attends to high-resolution
+    features with multi-scale context from skip connections.
+
+    Output resolution matches the initial voxel grid (grid_size), giving
+    spatially precise coordinates for positional embeddings and FPS
+    query generation.
+
+    Args:
+        grid_size (float): Voxel size for PTv3 serialization.
+        **kwargs: Forwarded to PointTransformerV3.__init__().
+    """
+
+    def __init__(self, grid_size=0.02, **kwargs):
+        kwargs["enc_mode"] = False  # full U-Net
+        super().__init__(**kwargs)
+        self.grid_size = grid_size
+
+    def forward(self, xyz, features=None):
+        """
+        Args:
+            xyz:      (B, N, 3) point coordinates
+            features: (B, C, N) point features, or None
+
+        Returns:
+            Point with decoded features at initial voxel resolution.
+        """
+        point = dense2point(xyz, features)
+        point["grid_size"] = self.grid_size
+
+        point.serialization(order=self.order, shuffle_orders=self.shuffle_orders)
+        point.sparsify()
+
+        point = self.embedding(point)
+        point = self.enc(point)
+        point = self.dec(point)
+        return point
