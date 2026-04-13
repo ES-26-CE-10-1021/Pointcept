@@ -88,6 +88,14 @@ class PTv3PreEncoder(PointTransformerV3):
 
         fps_inds = furthest_point_sample(fps_xyz, self.npoint).long()
 
+        if padding_mask is not None:
+            # If npoint exceeds real points in a scene, FPS may select padded
+            # positions. Replace those with the first real index per scene.
+            on_padded = torch.gather(padding_mask, 1, fps_inds)
+            if on_padded.any():
+                first_real = (~padding_mask).long().argmax(dim=1, keepdim=True)
+                fps_inds = torch.where(on_padded, first_real.expand_as(fps_inds), fps_inds)
+
         # Gather xyz: (B, npoint, 3)
         out_xyz = torch.gather(
             dense_xyz, 1, fps_inds.unsqueeze(-1).expand(-1, -1, 3)
