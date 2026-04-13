@@ -40,7 +40,7 @@ _base_ = ["../_base_/default_runtime.py"]
 
 # ── Training ─────────────────────────────────────────────────────────────────
 batch_size = 8       # total across all GPUs
-num_worker = 16
+num_worker = 32
 mix_prob = 0         # detection dataset does not support MixUp
 enable_amp = False
 find_unused_parameters = False
