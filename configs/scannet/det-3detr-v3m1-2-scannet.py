@@ -84,7 +84,7 @@ model = dict(
     num_queries=256,
     position_embedding="fourier",
     mlp_dropout=0.3,
-    projection_norm="bn1d_masked",  # Masked BN fix: zeros padded positions before/after BN
+    projection_norm="ln",  # LayerNorm: padding-safe (per-sample stats, unaffected by padding)
     # Detection criterion (Hungarian matching + weighted box losses)
     criterion=dict(
         type="SetCriterion3DETR",

@@ -90,10 +90,11 @@ class TestDensePointConversions:
         offset = torch.arange(1, B + 1) * N
 
         point = Point(dict(coord=coord, feat=feat, offset=offset))
-        xyz_out, feat_out = point2dense(point)
+        xyz_out, feat_out, padding_mask = point2dense(point)
 
         assert xyz_out.shape == (B, N, 3)
         assert feat_out.shape == (B, C, N)
+        assert padding_mask is None  # equal-length scenes need no mask
 
     def test_roundtrip_dense_to_point_to_dense(self):
         """dense → Point → dense must be numerically identical."""
@@ -102,7 +103,7 @@ class TestDensePointConversions:
         features = torch.randn(B, C, N)
 
         point = dense2point(xyz, features)
-        xyz_rt, feat_rt = point2dense(point)
+        xyz_rt, feat_rt, padding_mask = point2dense(point)
 
         torch.testing.assert_close(xyz_rt, xyz)
         torch.testing.assert_close(feat_rt, features)
@@ -115,15 +116,15 @@ class TestDensePointConversions:
         offset = torch.arange(1, B + 1) * N
 
         point = Point(dict(coord=coord, feat=feat, offset=offset))
-        xyz_dense, feat_dense = point2dense(point)
+        xyz_dense, feat_dense, _ = point2dense(point)
         point_rt = dense2point(xyz_dense, feat_dense)
 
         torch.testing.assert_close(point_rt.coord, coord)
         torch.testing.assert_close(point_rt.feat, feat)
         assert point_rt.offset.tolist() == offset.tolist()
 
-    def test_point2dense_variable_lengths_raises(self):
-        """point2dense must reject variable-length scenes (no padding mask)."""
+    def test_point2dense_variable_lengths_pads(self):
+        """point2dense must pad variable-length scenes and return a mask."""
         # Scene 0: 10 points, Scene 1: 20 points
         n0, n1, C = 10, 20, 4
         coord = torch.randn(n0 + n1, 3)
@@ -131,8 +132,18 @@ class TestDensePointConversions:
         offset = torch.tensor([n0, n0 + n1])
 
         point = Point(dict(coord=coord, feat=feat, offset=offset))
-        with pytest.raises(ValueError, match="variable-length scenes"):
-            point2dense(point)
+        xyz_out, feat_out, padding_mask = point2dense(point)
+
+        B, max_n = 2, n1
+        assert xyz_out.shape == (B, max_n, 3)
+        assert feat_out.shape == (B, C, max_n)
+        assert padding_mask is not None
+        assert padding_mask.shape == (B, max_n)
+        # Scene 0 is shorter: first n0 real, rest padded
+        assert not padding_mask[0, :n0].any()
+        assert padding_mask[0, n0:].all()
+        # Scene 1 has no padding
+        assert not padding_mask[1].any()
 
     def test_point2dense_equal_lengths(self):
         """point2dense must succeed when all scenes have equal length."""
@@ -142,10 +153,11 @@ class TestDensePointConversions:
         offset = torch.arange(1, B + 1) * N
 
         point = Point(dict(coord=coord, feat=feat, offset=offset))
-        xyz_out, feat_out = point2dense(point)
+        xyz_out, feat_out, padding_mask = point2dense(point)
 
         assert xyz_out.shape == (B, N, 3)
         assert feat_out.shape == (B, C, N)
+        assert padding_mask is None
         # Verify first scene data is correct
         torch.testing.assert_close(xyz_out[0], coord[:N])
 
@@ -157,7 +169,7 @@ class TestDensePointConversions:
         offset = torch.arange(1, B + 1) * N
 
         point = Point(dict(coord=coord, feat=feat, offset=offset))
-        xyz_out, feat_out = point2dense(point)
+        xyz_out, feat_out, _ = point2dense(point)
 
         loss = xyz_out.sum() + feat_out.sum()
         loss.backward()

@@ -7,7 +7,7 @@ so the decoder cross-attends to high-resolution features (~40K voxels at
 0.02m) with multi-scale context from skip connections.
 
 Usage:
-    sh scripts/train.sh -d scannet -c det-3detr-v4m1-0-scannet -n my_3detr_exp_4 -g 4
+    sh scripts/train.sh -d scannet -c det-3detr-v5m1-0-scannet -n my_3detr_exp_5 -g 4
 
 Data:
     Update `data_root` and `meta_data_dir` to point to your

@@ -8,7 +8,7 @@ Model3DETRDetector pipeline via the isinstance-based dispatch.
 Run with:
     pytest tests/test_ptv3_3detr_integration.py -v -s
 
-Requires CUDA and flash-attn.
+Requires CUDA.
 """
 
 import os
@@ -74,7 +74,7 @@ TINY_PTV3_CFG = dict(
     shuffle_orders=False,
     pre_norm=True,
     enable_rpe=False,
-    enable_flash=True,
+    enable_flash=False,
     upcast_attention=False,
     upcast_softmax=False,
     pdnorm_bn=False,

@@ -85,20 +85,21 @@ def point2dense(point):
         feat_out = point.feat.reshape(B, max_n, enc_dim).permute(0, 2, 1).contiguous()
         return xyz_out, feat_out, None
 
-    # Variable-length: split → pad → stack (differentiable, no in-place ops).
-    coord_splits = point.coord.split(counts.tolist())
-    feat_splits = point.feat.split(counts.tolist())
+    # Variable-length: scatter into pre-allocated dense tensors (no GPU→CPU sync).
+    device = point.coord.device
+    # Per-point position within its scene.
+    offsets_shifted = torch.cat([counts.new_zeros(1), point.offset[:-1]])
+    pos_in_scene = torch.arange(point.coord.shape[0], device=device) - offsets_shifted[point.batch]
 
-    xyz_out = torch.stack(
-        [F.pad(c, (0, 0, 0, max_n - c.shape[0])) for c in coord_splits]
-    )
-    feat_out = torch.stack(
-        [F.pad(f, (0, 0, 0, max_n - f.shape[0])) for f in feat_splits]
-    )
+    # Build (B, max_n, *) dense tensors via index_put (differentiable).
+    xyz_out = point.coord.new_zeros(B, max_n, 3)
+    feat_out = point.feat.new_zeros(B, max_n, enc_dim)
+    xyz_out[point.batch, pos_in_scene] = point.coord
+    feat_out[point.batch, pos_in_scene] = point.feat
 
     # True = padded (ignored in attention)
     padding_mask = (
-        torch.arange(max_n, device=point.coord.device).unsqueeze(0)
+        torch.arange(max_n, device=device).unsqueeze(0)
         >= counts.unsqueeze(1)
     )
 
@@ -182,8 +183,8 @@ class Model3DETRDetector(nn.Module):
         mlp_dropout (float): dropout in prediction MLP heads.
         criterion (dict): config for SetCriterion3DETR loss.
         projection_norm (str): norm for encoder_to_decoder_projection.
-            'bn1d' (default, original 3DETR), 'ln' (LayerNorm, padding-safe),
-            or 'bn1d_masked' (BN with padded positions zeroed before/after).
+            'bn1d' (default, original 3DETR) or 'ln' (LayerNorm, padding-safe).
+            Use 'ln' when variable-length padding is present.
     """
 
     def __init__(
@@ -227,16 +228,11 @@ class Model3DETRDetector(nn.Module):
             hidden_dims = [encoder_dim]
         else:
             hidden_dims = [encoder_dim, encoder_dim]
-        # 'bn1d_masked' uses bn1d in the MLP but zeros padded positions
-        # before and after the projection in forward() to prevent padding
-        # from corrupting BatchNorm statistics.
-        self._projection_masked_bn = projection_norm == "bn1d_masked"
-        mlp_norm = "bn1d" if self._projection_masked_bn else projection_norm
         self.encoder_to_decoder_projection = GenericMLP(
             input_dim=encoder_dim,
             hidden_dims=hidden_dims,
             output_dim=decoder_dim,
-            norm_fn_name=mlp_norm,
+            norm_fn_name=projection_norm,
             activation="relu",
             use_conv=True,
             output_use_activation=True,
@@ -345,8 +341,12 @@ class Model3DETRDetector(nn.Module):
 
         if enc_inds is None:
             enc_inds = pre_enc_inds
-        elif pre_enc_inds is not None:
-            enc_inds = torch.gather(pre_enc_inds, 1, enc_inds.type(torch.int64))
+        else:
+            # Encoder downsampled: gather padding_mask to match enc_xyz resolution.
+            if padding_mask is not None:
+                padding_mask = torch.gather(padding_mask, 1, enc_inds.type(torch.int64))
+            if pre_enc_inds is not None:
+                enc_inds = torch.gather(pre_enc_inds, 1, enc_inds.type(torch.int64))
 
         return enc_xyz, enc_features, enc_inds, padding_mask
 
@@ -368,6 +368,17 @@ class Model3DETRDetector(nn.Module):
             fps_xyz = encoder_xyz
 
         query_inds = furthest_point_sample(fps_xyz, self.num_queries).long()
+
+        if padding_mask is not None:
+            # If a scene has fewer real points than num_queries, FPS may select
+            # padded positions. Replace those with the first real index per scene.
+            on_padded = torch.gather(padding_mask, 1, query_inds)
+            if on_padded.any():
+                # First real (non-padded) index per scene — always exists.
+                first_real = (~padding_mask).long().argmax(dim=1, keepdim=True)
+                first_real = first_real.expand_as(query_inds)
+                query_inds = torch.where(on_padded, first_real, query_inds)
+
         query_xyz = torch.stack(
             [torch.gather(encoder_xyz[..., x], 1, query_inds) for x in range(3)],
             dim=-1,
@@ -475,16 +486,7 @@ class Model3DETRDetector(nn.Module):
             point_clouds
         )
         # enc_features: (N', B, C) → (B, C, N') for projection
-        proj_input = enc_features.permute(1, 2, 0)
-        if self._projection_masked_bn and padding_mask is not None:
-            # Zero padded positions before BN so they don't corrupt statistics.
-            # mask: (B, N') → (B, 1, N') broadcast over channels.
-            real_mask = (~padding_mask).unsqueeze(1).float()
-            proj_input = proj_input * real_mask
-        enc_features = self.encoder_to_decoder_projection(proj_input)
-        if self._projection_masked_bn and padding_mask is not None:
-            # Re-zero after projection (BN bias term may have added values).
-            enc_features = enc_features * real_mask
+        enc_features = self.encoder_to_decoder_projection(enc_features.permute(1, 2, 0))
         enc_features = enc_features.permute(2, 0, 1)
 
         if encoder_only:
