@@ -313,7 +313,7 @@ class TestPointPreEncoderDispatch:
 
         batch = self._make_batch()
         with torch.no_grad():
-            enc_xyz, enc_features, enc_inds = model.run_encoder(batch["point_clouds"])
+            enc_xyz, enc_features, enc_inds, padding_mask = model.run_encoder(batch["point_clouds"])
 
         B = 2
         assert enc_xyz.shape == (B, npoint, 3)
@@ -347,8 +347,8 @@ class TestPointPreEncoderDispatch:
 
         batch = self._make_batch()
         with torch.no_grad():
-            p_xyz, p_feat, p_inds = model_point.run_encoder(batch["point_clouds"])
-            t_xyz, t_feat, t_inds = model_tuple.run_encoder(batch["point_clouds"])
+            p_xyz, p_feat, p_inds, _ = model_point.run_encoder(batch["point_clouds"])
+            t_xyz, t_feat, t_inds, _ = model_tuple.run_encoder(batch["point_clouds"])
 
         torch.testing.assert_close(p_xyz, t_xyz, atol=1e-5, rtol=1e-4)
         torch.testing.assert_close(p_feat, t_feat, atol=1e-5, rtol=1e-4)
@@ -464,8 +464,8 @@ class TestPointEncoderDispatch:
 
         batch = self._make_batch()
         with torch.no_grad():
-            p_xyz, p_feat, _ = model_point.run_encoder(batch["point_clouds"])
-            t_xyz, t_feat, _ = model_tuple.run_encoder(batch["point_clouds"])
+            p_xyz, p_feat, _, _ = model_point.run_encoder(batch["point_clouds"])
+            t_xyz, t_feat, _, _ = model_tuple.run_encoder(batch["point_clouds"])
 
         torch.testing.assert_close(p_xyz, t_xyz, atol=1e-5, rtol=1e-4)
         torch.testing.assert_close(p_feat, t_feat, atol=1e-5, rtol=1e-4)
@@ -542,7 +542,7 @@ class TestPointPreEncoderPlusPointEncoder:
         assert out["center_unnormalized"].shape == (B, 32, 3)
         assert out["box_corners"].shape == (B, 32, 8, 3)
         # enc_inds should be None (both pre-enc and enc return Point)
-        enc_xyz, enc_feat, enc_inds = model.run_encoder(batch["point_clouds"])
+        enc_xyz, enc_feat, enc_inds, _ = model.run_encoder(batch["point_clouds"])
         assert enc_inds is None
 
 

@@ -312,13 +312,13 @@ class TestModelEquivalence:
         with torch.no_grad():
             torch.manual_seed(42)
             torch.cuda.manual_seed(42)
-            n_xyz, n_feat, n_inds = native_model.run_encoder(
+            n_xyz, n_feat, n_inds, _ = native_model.run_encoder(
                 batch["point_clouds"]
             )
 
             torch.manual_seed(42)
             torch.cuda.manual_seed(42)
-            p_xyz, p_feat, p_inds = pc_model.run_encoder(
+            p_xyz, p_feat, p_inds, _ = pc_model.run_encoder(
                 batch["point_clouds"]
             )
 

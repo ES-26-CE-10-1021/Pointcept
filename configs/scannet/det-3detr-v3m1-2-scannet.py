@@ -2,10 +2,10 @@
 3DETR on ScanNet — 3D Object Detection (18 classes, axis-aligned boxes)
 
 v3m1-2: PTv3 pre-encoder + VanillaTransformerEncoder + 3DETR decoder.
-Fix: Masked BatchNorm in encoder_to_decoder_projection — zeros padded positions
-before and after BN so they don't corrupt running statistics or feature scaling.
+Fix: LayerNorm in encoder_to_decoder_projection — padding-safe because it uses
+per-sample statistics and does not depend on batch-wide running statistics.
 
-Baseline: det-3detr-v3m1-0-scannet.py (same architecture, default BN projection)
+Baseline: det-3detr-v3m1-0-scannet.py (same architecture, default projection norm)
 
 Usage:
     sh scripts/train.sh -d scannet -c det-3detr-v3m1-2-scannet -n 3detr_ptv3_enc_mbn -g 4
