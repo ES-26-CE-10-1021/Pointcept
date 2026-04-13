@@ -120,7 +120,7 @@ Located in `libs/`: `pointops` (core point operations), `pointops2`, `pointgroup
 - **Registered components**: `Model3DETRDetector` (MODELS), `PTv3PreEncoder`, `PTv3UNetPreEncoder`, `PointnetSAPreEncoder`, `IdentityEncoder3DETR`, `VanillaTransformerEncoder3DETR`, `MaskedTransformerEncoder3DETR`, `TransformerDecoder3DETR`, `ScanNetDetectionConfig` (MODULES), `SetCriterion3DETR` (LOSSES), `ObjDetEvaluator` (HOOKS), `ObjDetTester` (TESTERS)
 - **PTv3 encoder**: `PTv3PreEncoder` wraps PointTransformerV3 as a pre-encoder. Variable-length output from voxelization is handled by `point2dense()` which pads to max scene length and returns a `padding_mask` threaded through the decoder's cross-attention. FPS query sampling masks padded positions by pushing them to `1e6`.
 - **`pre_encoder=None`**: skips PointNet++ SA; set `input_feature_dim` to match input channels beyond XYZ
-- **Configs**: `det-3detr-v1m1-0-scannet.py` (PointNet++ SA encoder), `det-3detr-v2m1-0-scannet.py` (PTv3 encoder), `det-3detr-v3m1-0-scannet.py`, `det-3detr-v4m1-0-scannet.py`, `det-3detr-v5m1-0-scannet.py`
+- **Configs**: `det-3detr-v0m1-0-scannet.py` (native 3DETR baseline), `det-3detr-v1m1-0-scannet.py` (PointNet++ SA encoder), `det-3detr-v2m1-0-scannet.py` (PTv3 + Identity encoder), `det-3detr-v3m1-0-scannet.py` (PTv3 + Vanilla Transformer encoder), `det-3detr-v3m1-1-scannet.py` (PTv3 + FPS + Vanilla Transformer encoder), `det-3detr-v4m1-0-scannet.py` (PTv3 U-Net + Identity encoder)
 - **Evaluation**: AP25/AP50 reported as percentages (0–100); uses `APCalculator.step_meter()` from `third_party/3detr/utils/ap_calculator.py`
 
 ## Key Conventions

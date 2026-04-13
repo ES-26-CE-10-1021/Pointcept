@@ -17,7 +17,7 @@ eval_epoch = 10
 
 # batch_size = 8 for 1 GPU (matching native batchsize_per_gpu=8)
 batch_size = 8
-num_worker = 32
+num_worker = 16
 
 seed = 0  # match native 3DETR --seed 0
 

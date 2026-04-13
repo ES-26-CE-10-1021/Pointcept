@@ -1,18 +1,13 @@
 """
 3DETR on ScanNet — 3D Object Detection (18 classes, axis-aligned boxes)
 
-v4m1-0: PTv3 pre-encoder + FPS downsampling (2048 pts) + VanillaTransformerEncoder
-        + 3DETR decoder.
-
-Key changes from v3:
-  - FPS after PTv3 encoding selects 2048 spatially well-distributed points,
-    producing fixed-length output (no padding mask needed).
-  - Output dim reduced to 256 (enc_channels[-1]=256) to match decoder_dim,
-    eliminating the dimension mismatch in encoder_to_decoder_projection.
-  - No padding_mask means BatchNorm in the projection is safe.
+PTv3 U-Net backbone (full encode + decode) with 3DETR transformer decoder.
+Unlike v2 (encoder-only, coarse 0.32m output), this runs PTv3's full U-Net
+so the decoder cross-attends to high-resolution features (~40K voxels at
+0.02m) with multi-scale context from skip connections.
 
 Usage:
-    sh scripts/train.sh -d scannet -c det-3detr-v4m1-0-scannet -n 3detr_ptv3_fps -g 4
+    sh scripts/train.sh -d scannet -c det-3detr-v4m1-0-scannet -n my_3detr_exp_4 -g 4
 
 Data:
     Update `data_root` and `meta_data_dir` to point to your
@@ -32,18 +27,23 @@ clip_grad = 0.1
 # ── Model ─────────────────────────────────────────────────────────────────────
 model = dict(
     type="Model3DETRDetector",
-    # PTv3 Encoder with FPS downsampling
+    # PTv3 U-Net (full encode + decode for high-resolution output)
     pre_encoder=dict(
-        type="PTv3PreEncoder",
+        type="PTv3UNetPreEncoder",
         grid_size=0.02,
-        npoint=2048,       # FPS downsample to fixed 2048 points after PTv3
         in_channels=3,
         order=("z", "z-trans", "hilbert", "hilbert-trans"),
         stride=(2, 2, 2, 2),
+        # Encoder stages
         enc_depths=(2, 2, 2, 6, 2),
-        enc_channels=(32, 64, 128, 256, 256),   # last stage 256 to match decoder_dim
-        enc_num_head=(2, 4, 8, 16, 16),         # head_dim=16 throughout
+        enc_channels=(32, 64, 128, 256, 512),
+        enc_num_head=(2, 4, 8, 16, 32),
         enc_patch_size=(1024, 1024, 1024, 1024, 1024),
+        # Decoder stages (upsample back to initial voxel resolution)
+        dec_depths=(2, 2, 2, 2),
+        dec_channels=(64, 64, 128, 256),
+        dec_num_head=(4, 4, 8, 16),
+        dec_patch_size=(1024, 1024, 1024, 1024),
         mlp_ratio=4,
         qkv_bias=True,
         qk_scale=None,
@@ -63,15 +63,9 @@ model = dict(
         pdnorm_affine=True,
         pdnorm_conditions=("ScanNet", "S3DIS", "Structured3D"),
     ),
-    # Vanilla Transformer encoder (no masking / downsampling)
+    # Identity mapping (PTv3 U-Net already produces high-quality features)
     encoder=dict(
-        type="VanillaTransformerEncoder3DETR",
-        encoder_dim=256,   # matches enc_channels[-1]
-        nhead=4,
-        nlayers=3,
-        ffn_dim=128,
-        dropout=0.1,
-        activation="relu",
+        type="IdentityEncoder3DETR",
     ),
     # Cross-attention decoder for box queries
     decoder=dict(
@@ -84,19 +78,20 @@ model = dict(
     ),
     # ScanNet dataset metadata (class count, box parametrisation, etc.)
     dataset_config=dict(type="ScanNetDetectionConfig"),
-    encoder_dim=256,   # matches enc_channels[-1] and decoder_dim — projection is 256→256
+    encoder_dim=64,    # must match dec_channels[0]; encoder_to_decoder_projection handles 64->256
     decoder_dim=256,
     num_queries=256,
     position_embedding="fourier",
     mlp_dropout=0.3,
+    projection_norm="ln",  # LayerNorm: padding-safe with variable-length PTv3 output
     # Detection criterion (Hungarian matching + weighted box losses)
     criterion=dict(
         type="SetCriterion3DETR",
         matcher_cfg=dict(
             cost_class=1.0,
-            cost_objectness=0.1,
-            cost_giou=1.0,
-            cost_center=5.0,
+            cost_objectness=0.0,     # native default (disabled)
+            cost_giou=2.0,           # native default
+            cost_center=0.0,         # native default (disabled)
         ),
         loss_weight_dict=dict(
             loss_giou_weight=1.0,
@@ -122,8 +117,8 @@ scheduler = dict(
     max_lr=[5e-4],
     pct_start=0.05,
     anneal_strategy="cos",
-    div_factor=500.0, # 10.0
-    final_div_factor=1.0, # 1000.0
+    div_factor=500, # 10.0,
+    final_div_factor=1, # 1000.0,
 )
 
 # ── Dataset ───────────────────────────────────────────────────────────────────

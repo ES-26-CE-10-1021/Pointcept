@@ -2,11 +2,9 @@
 3DETR on ScanNet — v0: Native 3DETR defaults
 
 Matches the native third_party/3detr training settings as closely as possible.
-Key differences from det-3detr-v1m1-0-scannet.py (documented in
-tests/test_3detr_cross_validation.py::TestConfigAudit):
-  - loss_giou_weight=0 (disabled, matching native default)
-  - loss_no_object_weight=0.2 (native default, not 0.25)
-  - Matcher costs: giou=2, center=0, objectness=0 (native defaults)
+All criterion settings match native 3DETR defaults
+(see third_party/3detr/scripts/scannet_ep1080.sh).
+Key settings:
   - 720 total epochs with cosine+warmup LR schedule (not 90 + OneCycleLR)
   - batch_size=16 (8 per GPU on 2 GPUs, matching native's batchsize_per_gpu=8)
   - No AMP (native does not use mixed precision)
@@ -76,9 +74,9 @@ model = dict(
             cost_center=0.0,         # native default (disabled)
         ),
         loss_weight_dict=dict(
-            loss_giou_weight=0.0,    # native default (GIoU loss disabled!)
+            loss_giou_weight=1.0,    # native default
             loss_sem_cls_weight=1.0,
-            loss_no_object_weight=0.2,   # native default
+            loss_no_object_weight=0.25,  # native default
             loss_angle_cls_weight=0.1,
             loss_angle_reg_weight=0.5,
             loss_center_weight=5.0,

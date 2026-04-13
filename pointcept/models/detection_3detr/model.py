@@ -61,8 +61,10 @@ def point2dense(point):
 
     When all scenes have the same point count, uses reshape (zero-copy,
     fully differentiable). When scenes have variable lengths (e.g. after
-    PTv3 voxelization), pads to max_n using split/F.pad/stack (preserves
-    autograd) and returns a padding mask for downstream attention layers.
+    PTv3 voxelization), allocates dense tensors of length max_n and scatters
+    each point into its per-scene position via indexed assignment
+    (preserves autograd), then returns a padding mask for downstream
+    attention layers.
 
     Args:
         point: Point with coord (total, 3), feat (total, C), offset (B,)

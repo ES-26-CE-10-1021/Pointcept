@@ -15,10 +15,10 @@ Data:
 _base_ = ["../_base_/default_runtime.py"]
 
 # ── Training ─────────────────────────────────────────────────────────────────
-batch_size = 32      # total across all GPUs
-num_worker = 64
+batch_size = 8      # total across all GPUs
+num_worker = 16
 mix_prob = 0         # detection dataset does not support MixUp
-enable_amp = True
+enable_amp = False
 find_unused_parameters = False
 clip_grad = 0.1
 
@@ -75,19 +75,21 @@ model = dict(
     num_queries=256,
     position_embedding="fourier",
     mlp_dropout=0.3,
+    projection_norm="ln",
     # Detection criterion (Hungarian matching + weighted box losses)
+    # Detection criterion — native 3DETR defaults (see third_party/3detr/scripts/scannet_ep1080.sh)
     criterion=dict(
         type="SetCriterion3DETR",
         matcher_cfg=dict(
             cost_class=1.0,
-            cost_objectness=0.0,
-            cost_giou=2.0,
-            cost_center=0.0,
+            cost_objectness=0.0,     # native default (disabled)
+            cost_giou=2.0,           # native default
+            cost_center=0.0,         # native default (disabled)
         ),
         loss_weight_dict=dict(
-            loss_giou_weight=0.0,
+            loss_giou_weight=1.0,    # native default
             loss_sem_cls_weight=1.0,
-            loss_no_object_weight=0.2,
+            loss_no_object_weight=0.25,  # native default
             loss_angle_cls_weight=0.1,
             loss_angle_reg_weight=0.5,
             loss_center_weight=5.0,

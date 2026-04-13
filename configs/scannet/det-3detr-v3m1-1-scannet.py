@@ -1,14 +1,17 @@
 """
 3DETR on ScanNet — 3D Object Detection (18 classes, axis-aligned boxes)
 
-v3m1-1: PTv3 pre-encoder + VanillaTransformerEncoder + 3DETR decoder.
-Fix: LayerNorm in encoder_to_decoder_projection (replaces default BatchNorm1d)
-to avoid BN corruption from zero-padded positions in variable-length scenes.
+v3m1-1: PTv3 pre-encoder + FPS downsampling (2048 pts) + VanillaTransformerEncoder
+        + 3DETR decoder.
 
-Baseline: det-3detr-v3m1-0-scannet.py (same architecture, default BN projection)
+Key changes from v3m1-0:
+  - FPS after PTv3 encoding selects 2048 spatially well-distributed points,
+    producing fixed-length output (no padding mask needed).
+  - Output dim reduced to 256 (enc_channels[-1]=256) to match decoder_dim,
+    eliminating the dimension mismatch in encoder_to_decoder_projection.
 
 Usage:
-    sh scripts/train.sh -d scannet -c det-3detr-v3m1-1-scannet -n 3detr_ptv3_enc_ln -g 4
+    sh scripts/train.sh -d scannet -c det-3detr-v3m1-1-scannet -n 3detr_ptv3_fps -g 4
 
 Data:
     Update `data_root` and `meta_data_dir` to point to your
@@ -28,16 +31,17 @@ clip_grad = 0.1
 # ── Model ─────────────────────────────────────────────────────────────────────
 model = dict(
     type="Model3DETRDetector",
-    # PTv3 Encoder
+    # PTv3 Encoder with FPS downsampling
     pre_encoder=dict(
         type="PTv3PreEncoder",
         grid_size=0.02,
+        npoint=2048,       # FPS downsample to fixed 2048 points after PTv3
         in_channels=3,
         order=("z", "z-trans", "hilbert", "hilbert-trans"),
         stride=(2, 2, 2, 2),
         enc_depths=(2, 2, 2, 6, 2),
-        enc_channels=(32, 64, 128, 256, 512),
-        enc_num_head=(2, 4, 8, 16, 32),
+        enc_channels=(32, 64, 128, 256, 256),   # last stage 256 to match decoder_dim
+        enc_num_head=(2, 4, 8, 16, 16),         # head_dim=16 throughout
         enc_patch_size=(1024, 1024, 1024, 1024, 1024),
         mlp_ratio=4,
         qkv_bias=True,
@@ -61,7 +65,7 @@ model = dict(
     # Vanilla Transformer encoder (no masking / downsampling)
     encoder=dict(
         type="VanillaTransformerEncoder3DETR",
-        encoder_dim=512,   # must match enc_channels[-1] from PTv3
+        encoder_dim=256,   # matches enc_channels[-1]
         nhead=4,
         nlayers=3,
         ffn_dim=128,
@@ -79,20 +83,20 @@ model = dict(
     ),
     # ScanNet dataset metadata (class count, box parametrisation, etc.)
     dataset_config=dict(type="ScanNetDetectionConfig"),
-    encoder_dim=512,   # must match enc_channels[-1]; encoder_to_decoder_projection handles 512->256
+    encoder_dim=256,   # matches enc_channels[-1] and decoder_dim — projection is 256→256
     decoder_dim=256,
     num_queries=256,
     position_embedding="fourier",
     mlp_dropout=0.3,
-    projection_norm="ln",  # LayerNorm fix: avoids BN corruption from zero-padded positions
+    projection_norm="ln",  # LayerNorm: padding-safe with variable-length PTv3 output
     # Detection criterion (Hungarian matching + weighted box losses)
     criterion=dict(
         type="SetCriterion3DETR",
         matcher_cfg=dict(
             cost_class=1.0,
-            cost_objectness=0.1,
-            cost_giou=1.0,
-            cost_center=5.0,
+            cost_objectness=0.0,     # native default (disabled)
+            cost_giou=2.0,           # native default
+            cost_center=0.0,         # native default (disabled)
         ),
         loss_weight_dict=dict(
             loss_giou_weight=1.0,

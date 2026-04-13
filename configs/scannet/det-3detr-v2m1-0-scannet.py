@@ -75,14 +75,15 @@ model = dict(
     num_queries=256,
     position_embedding="fourier",
     mlp_dropout=0.3,
+    projection_norm="ln",
     # Detection criterion (Hungarian matching + weighted box losses)
     criterion=dict(
         type="SetCriterion3DETR",
         matcher_cfg=dict(
             cost_class=1.0,
-            cost_objectness=0.1,
-            cost_giou=1.0,
-            cost_center=5.0,
+            cost_objectness=0.0,     # native default (disabled)
+            cost_giou=2.0,           # native default
+            cost_center=0.0,         # native default (disabled)
         ),
         loss_weight_dict=dict(
             loss_giou_weight=1.0,

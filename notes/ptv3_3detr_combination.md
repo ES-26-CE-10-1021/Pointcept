@@ -103,27 +103,24 @@ experiment iteration.
 ### PTv3 encoder-only → Vanilla Transformer encoder (v3 family)
 
 These three configs share the same architecture — PTv3 encoder-only →
-3-layer `VanillaTransformerEncoder3DETR` → 3DETR decoder — and differ only
-in how the `encoder_to_decoder_projection` MLP is normalized. They were
-created specifically to isolate the BN-on-padding problem.
+3-layer `VanillaTransformerEncoder3DETR` → 3DETR decoder — and were
+created to isolate projection-normalization behavior on variable-length
+inputs. All PTv3-based configs now use `projection_norm="ln"` (LayerNorm)
+which is padding-safe since it computes per-sample statistics. The
+`bn1d_masked` option was removed because zeroing padded positions does not
+actually prevent them from affecting BN mean/variance.
 
-| Config                        | `projection_norm` | Purpose                                                                                            |
-| ----------------------------- | ----------------- | -------------------------------------------------------------------------------------------------- |
-| `det-3detr-v3m1-0-scannet.py` | `bn1d` (default)  | Baseline. Known to be affected by padded-position corruption when scenes have variable length.     |
-| `det-3detr-v3m1-1-scannet.py` | `ln`              | LayerNorm fix — per-sample, so padding cannot corrupt statistics.                                  |
-| `det-3detr-v3m1-2-scannet.py` | `bn1d_masked`     | Keeps BN but zeros padded positions before/after the projection so they never enter BN statistics. |
-
-### PTv3 encoder + FPS downsampling (v4)
+### PTv3 encoder + FPS downsampling (v3m1-1)
 
 | Config                        | Notes                                                                                                                                                                                                                                                                                                                       |
 | ----------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `det-3detr-v4m1-0-scannet.py` | `PTv3PreEncoder(npoint=2048)` — PTv3 encoder followed by FPS to a fixed 2048 points per scene. No padding mask is needed downstream, so the default `bn1d` projection is safe. `enc_channels[-1]=256` is chosen to match `decoder_dim`, eliminating the dimension mismatch that previously went through the projection MLP. |
+| `det-3detr-v3m1-1-scannet.py` | `PTv3PreEncoder(npoint=2048)` — PTv3 encoder followed by FPS to a fixed 2048 points per scene. No padding mask is needed downstream. `enc_channels[-1]=256` is chosen to match `decoder_dim`, eliminating the dimension mismatch in encoder_to_decoder_projection. |
 
-### PTv3 U-Net → IdentityEncoder (v5)
+### PTv3 U-Net → IdentityEncoder (v4)
 
 | Config                        | Notes                                                                                                                                                                                                                                                                                                                                  |
 | ----------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `det-3detr-v5m1-0-scannet.py` | `PTv3UNetPreEncoder` — full PTv3 U-Net (encoder + decoder) producing dense features at the initial voxel grid. Handed directly to the 3DETR decoder via `IdentityEncoder3DETR`; the rationale is that the U-Net's multi-scale skip connections already provide the cross-scale context that a transformer encoder would otherwise add. |
+| `det-3detr-v4m1-0-scannet.py` | `PTv3UNetPreEncoder` — full PTv3 U-Net (encoder + decoder) producing dense features at the initial voxel grid. Handed directly to the 3DETR decoder via `IdentityEncoder3DETR`; the rationale is that the U-Net's multi-scale skip connections already provide the cross-scale context that a transformer encoder would otherwise add. |
 
 ## Quick mental map
 
@@ -135,8 +132,8 @@ created specifically to isolate the BN-on-padding problem.
                 │
  PTv3 U-Net ────┘
 
- Variable-length path uses padding_mask + (LN | masked BN) projection.
- Fixed-length path (PointNet++ SA, PTv3 + FPS) uses default BN projection.
+ Variable-length path uses padding_mask + LN projection.
+ Fixed-length path (PointNet++ SA, PTv3 + FPS) also uses LN for consistency.
 ```
 
 ## Status at time of writing (2026-04-10)

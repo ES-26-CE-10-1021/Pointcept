@@ -15,10 +15,10 @@ Data:
 _base_ = ["../_base_/default_runtime.py"]
 
 # ── Training ─────────────────────────────────────────────────────────────────
-batch_size = 16      # total across all GPUs
-num_worker = 24
+batch_size = 8      # total across all GPUs
+num_worker = 16
 mix_prob = 0         # detection dataset does not support MixUp
-enable_amp = True
+enable_amp = False
 find_unused_parameters = False
 clip_grad = 0.1
 
@@ -65,9 +65,9 @@ model = dict(
         type="SetCriterion3DETR",
         matcher_cfg=dict(
             cost_class=1.0,
-            cost_objectness=0.1,
-            cost_giou=1.0,
-            cost_center=5.0,
+            cost_objectness=0.0,     # native default (disabled)
+            cost_giou=2.0,           # native default
+            cost_center=0.0,         # native default (disabled)
         ),
         loss_weight_dict=dict(
             loss_giou_weight=1.0,
