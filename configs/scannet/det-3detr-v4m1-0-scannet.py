@@ -1,11 +1,13 @@
 """
 3DETR on ScanNet — 3D Object Detection (18 classes, axis-aligned boxes)
 
-Vanilla 3DETR with PointNet++ pre-encoder + Transformer encoder/decoder.
-Trained on ScanNet detection data (VoteNet-style pre-processed format).
+PTv3 U-Net backbone (full encode + decode) with 3DETR transformer decoder.
+Unlike v2 (encoder-only, coarse 0.32m output), this runs PTv3's full U-Net
+so the decoder cross-attends to high-resolution features (~40K voxels at
+0.02m) with multi-scale context from skip connections.
 
 Usage:
-    sh scripts/train.sh -d scannet -c det-3detr-v1m1-0-scannet -n my_3detr_exp -g 4
+    sh scripts/train.sh -d scannet -c det-3detr-v4m1-0-scannet -n my_3detr_exp_4 -g 4
 
 Data:
     Update `data_root` and `meta_data_dir` to point to your
@@ -25,24 +27,45 @@ clip_grad = 0.1
 # ── Model ─────────────────────────────────────────────────────────────────────
 model = dict(
     type="Model3DETRDetector",
-    # PointNet++ pre-encoder: sub-samples to 2048 points
+    # PTv3 U-Net (full encode + decode for high-resolution output)
     pre_encoder=dict(
-        type="PointnetSAPreEncoder",
-        npoint=2048,
-        radius=0.2,
-        nsample=64,
-        mlp_dims=[0, 64, 128, 256],   # XYZ only (no colour). PointnetSAModule adds 3 for XYZ automatically.
-        normalize_xyz=True,
+        type="PTv3UNetPreEncoder",
+        grid_size=0.02,
+        in_channels=3,
+        order=("z", "z-trans", "hilbert", "hilbert-trans"),
+        stride=(2, 2, 2, 2),
+        # Encoder stages
+        enc_depths=(2, 2, 2, 6, 2),
+        enc_channels=(32, 64, 128, 256, 512),
+        enc_num_head=(2, 4, 8, 16, 32),
+        enc_patch_size=(1024, 1024, 1024, 1024, 1024),
+        # Decoder stages (upsample back to initial voxel resolution)
+        dec_depths=(2, 2, 2, 2),
+        dec_channels=(64, 64, 128, 256),
+        dec_num_head=(4, 4, 8, 16),
+        dec_patch_size=(1024, 1024, 1024, 1024),
+        mlp_ratio=4,
+        qkv_bias=True,
+        qk_scale=None,
+        attn_drop=0.0,
+        proj_drop=0.0,
+        drop_path=0.3,
+        shuffle_orders=True,
+        pre_norm=True,
+        enable_rpe=False,
+        enable_flash=True,
+        upcast_attention=False,
+        upcast_softmax=False,
+        pdnorm_bn=False,
+        pdnorm_ln=False,
+        pdnorm_decouple=True,
+        pdnorm_adaptive=False,
+        pdnorm_affine=True,
+        pdnorm_conditions=("ScanNet", "S3DIS", "Structured3D"),
     ),
-    # Vanilla Transformer encoder (no masking / downsampling)
+    # Identity mapping (PTv3 U-Net already produces high-quality features)
     encoder=dict(
-        type="VanillaTransformerEncoder3DETR",
-        encoder_dim=256,
-        nhead=4,
-        nlayers=3,
-        ffn_dim=128,
-        dropout=0.1,
-        activation="relu",
+        type="IdentityEncoder3DETR",
     ),
     # Cross-attention decoder for box queries
     decoder=dict(
@@ -55,11 +78,12 @@ model = dict(
     ),
     # ScanNet dataset metadata (class count, box parametrisation, etc.)
     dataset_config=dict(type="ScanNetDetectionConfig"),
-    encoder_dim=256,
+    encoder_dim=64,    # must match dec_channels[0]; encoder_to_decoder_projection handles 64->256
     decoder_dim=256,
     num_queries=256,
     position_embedding="fourier",
     mlp_dropout=0.3,
+    projection_norm="ln",  # LayerNorm: padding-safe with variable-length PTv3 output
     # Detection criterion (Hungarian matching + weighted box losses)
     criterion=dict(
         type="SetCriterion3DETR",
@@ -84,8 +108,8 @@ model = dict(
 )
 
 # ── Scheduler ─────────────────────────────────────────────────────────────────
-epoch = 90
-eval_epoch = 10      # evaluate every N epochs
+epoch = 720
+eval_epoch = 20      # evaluate every N epochs
 
 optimizer = dict(type="AdamW", lr=5e-4, weight_decay=0.1)
 scheduler = dict(
@@ -93,8 +117,8 @@ scheduler = dict(
     max_lr=[5e-4],
     pct_start=0.05,
     anneal_strategy="cos",
-    div_factor=10.0,
-    final_div_factor=1000.0,
+    div_factor=500, # 10.0,
+    final_div_factor=1, # 1000.0,
 )
 
 # ── Dataset ───────────────────────────────────────────────────────────────────

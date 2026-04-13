@@ -57,38 +57,55 @@ def dense2point(xyz, features=None):
 
 
 def point2dense(point):
-    """Convert a Pointcept Point object to equal-length dense tensors.
+    """Convert a Pointcept Point object to dense tensors with optional padding.
 
-    All scenes must have the same point count. The 3DETR encoder/decoder
-    does not use a key-padding mask, so zero-padded rows would silently
-    corrupt attention weights, FPS query selection, and predictions.
+    When all scenes have the same point count, uses reshape (zero-copy,
+    fully differentiable). When scenes have variable lengths (e.g. after
+    PTv3 voxelization), allocates dense tensors of length max_n and scatters
+    each point into its per-scene position via indexed assignment
+    (preserves autograd), then returns a padding mask for downstream
+    attention layers.
 
     Args:
         point: Point with coord (total, 3), feat (total, C), offset (B,)
 
     Returns:
-        xyz_out:  (B, N, 3)
-        feat_out: (B, C, N)
-
-    Raises:
-        ValueError: if scenes have different point counts.
+        xyz_out:      (B, N, 3)
+        feat_out:     (B, C, N)
+        padding_mask: (B, N) bool tensor where True = padded position,
+                      or None if all scenes have equal length.
     """
     counts = offset2bincount(point.offset)  # (B,)
     B = len(counts)
     max_n = counts.max().item()
-    if (counts != max_n).any():
-        raise ValueError(
-            "point2dense received variable-length scenes (offset-derived counts "
-            f"{counts.tolist()}); this 3DETR path assumes equal-length scenes "
-            "because no key-padding mask is used. Please pre-pad/trim to a "
-            "fixed length or extend the model to handle a padding mask."
-        )
-    # All scenes have the same number of points (max_n), and offsets define
-    # contiguous blocks per scene, so we can reshape without breaking autograd.
     enc_dim = point.feat.shape[-1]
-    xyz_out = point.coord.reshape(B, max_n, 3)
-    feat_out = point.feat.reshape(B, max_n, enc_dim).permute(0, 2, 1).contiguous()
-    return xyz_out, feat_out  # (B, max_n, 3), (B, C, max_n)
+
+    if (counts == max_n).all():
+        # Equal-length fast path: reshape preserves autograd (no copy).
+        xyz_out = point.coord.reshape(B, max_n, 3)
+        feat_out = point.feat.reshape(B, max_n, enc_dim).permute(0, 2, 1).contiguous()
+        return xyz_out, feat_out, None
+
+    # Variable-length: scatter into pre-allocated dense tensors (no GPU→CPU sync).
+    device = point.coord.device
+    # Per-point position within its scene.
+    offsets_shifted = torch.cat([counts.new_zeros(1), point.offset[:-1]])
+    pos_in_scene = torch.arange(point.coord.shape[0], device=device) - offsets_shifted[point.batch]
+
+    # Build (B, max_n, *) dense tensors via index_put (differentiable).
+    xyz_out = point.coord.new_zeros(B, max_n, 3)
+    feat_out = point.feat.new_zeros(B, max_n, enc_dim)
+    xyz_out[point.batch, pos_in_scene] = point.coord
+    feat_out[point.batch, pos_in_scene] = point.feat
+
+    # True = padded (ignored in attention)
+    padding_mask = (
+        torch.arange(max_n, device=device).unsqueeze(0)
+        >= counts.unsqueeze(1)
+    )
+
+    feat_out = feat_out.permute(0, 2, 1).contiguous()
+    return xyz_out, feat_out, padding_mask
 
 
 class BoxProcessor:
@@ -166,6 +183,9 @@ class Model3DETRDetector(nn.Module):
         position_embedding (str): 'fourier' or 'sine'.
         mlp_dropout (float): dropout in prediction MLP heads.
         criterion (dict): config for SetCriterion3DETR loss.
+        projection_norm (str): norm for encoder_to_decoder_projection.
+            'bn1d' (default, original 3DETR) or 'ln' (LayerNorm, padding-safe).
+            Use 'ln' when variable-length padding is present.
     """
 
     def __init__(
@@ -181,6 +201,7 @@ class Model3DETRDetector(nn.Module):
         mlp_dropout=0.3,
         criterion=None,
         input_feature_dim=0,
+        projection_norm="bn1d",
     ):
         super().__init__()
 
@@ -212,7 +233,7 @@ class Model3DETRDetector(nn.Module):
             input_dim=encoder_dim,
             hidden_dims=hidden_dims,
             output_dim=decoder_dim,
-            norm_fn_name="bn1d",
+            norm_fn_name=projection_norm,
             activation="relu",
             use_conv=True,
             output_use_activation=True,
@@ -273,13 +294,22 @@ class Model3DETRDetector(nn.Module):
         return xyz, features
 
     def run_encoder(self, point_clouds):
+        """Run pre-encoder + encoder, returning dense tensors and padding mask.
+
+        Returns:
+            enc_xyz:      (B, N', 3)
+            enc_features: (N', B, C) — transformer convention
+            enc_inds:     (B, N') or None
+            padding_mask: (B, N') bool (True = padded) or None
+        """
         xyz, features = self._break_up_pc(point_clouds)
+        padding_mask = None
 
         if self.pre_encoder is not None:
             result = self.pre_encoder(xyz, features)
             if isinstance(result, Point):
                 # Point-returning pre-encoder (e.g. a PTv3-based component)
-                pre_enc_xyz, pre_enc_features = point2dense(result)
+                pre_enc_xyz, pre_enc_features, padding_mask = point2dense(result)
                 pre_enc_inds = None
             else:
                 pre_enc_xyz, pre_enc_features, pre_enc_inds = result
@@ -301,10 +331,10 @@ class Model3DETRDetector(nn.Module):
             # Project to encoder_dim and convert to (N, B, C)
             pre_enc_features = self.input_projection(inp).permute(1, 0, 2)
 
-        result = self.encoder(pre_enc_features, xyz=pre_enc_xyz)
+        result = self.encoder(pre_enc_features, xyz=pre_enc_xyz, padding_mask=padding_mask)
         if isinstance(result, Point):
             # Point-returning encoder (e.g. a PTv3-based encoder component)
-            enc_xyz, enc_features_dense = point2dense(result)
+            enc_xyz, enc_features_dense, padding_mask = point2dense(result)
             enc_features = enc_features_dense.permute(2, 0, 1)  # → (N'', B, C)
             enc_inds = None
         else:
@@ -312,13 +342,44 @@ class Model3DETRDetector(nn.Module):
 
         if enc_inds is None:
             enc_inds = pre_enc_inds
-        elif pre_enc_inds is not None:
-            enc_inds = torch.gather(pre_enc_inds, 1, enc_inds.type(torch.int64))
+        else:
+            # Encoder downsampled: gather padding_mask to match enc_xyz resolution.
+            if padding_mask is not None:
+                padding_mask = torch.gather(padding_mask, 1, enc_inds.type(torch.int64))
+            if pre_enc_inds is not None:
+                enc_inds = torch.gather(pre_enc_inds, 1, enc_inds.type(torch.int64))
 
-        return enc_xyz, enc_features, enc_inds
+        return enc_xyz, enc_features, enc_inds, padding_mask
 
-    def get_query_embeddings(self, encoder_xyz, point_cloud_dims):
-        query_inds = furthest_point_sample(encoder_xyz, self.num_queries).long()
+    def get_query_embeddings(self, encoder_xyz, point_cloud_dims, padding_mask=None):
+        """Sample query points via FPS and compute positional embeddings.
+
+        Args:
+            encoder_xyz:    (B, N, 3) encoder output coordinates
+            point_cloud_dims: [min (B,3), max (B,3)]
+            padding_mask:   (B, N) bool or None. True = padded position.
+                            Padded positions are moved far away so FPS
+                            naturally ignores them.
+        """
+        if padding_mask is not None:
+            # Push padded coords far from real points so FPS won't select them.
+            fps_xyz = encoder_xyz.clone()
+            fps_xyz[padding_mask] = 1e6
+        else:
+            fps_xyz = encoder_xyz
+
+        query_inds = furthest_point_sample(fps_xyz, self.num_queries).long()
+
+        if padding_mask is not None:
+            # If a scene has fewer real points than num_queries, FPS may select
+            # padded positions. Replace those with the first real index per scene.
+            on_padded = torch.gather(padding_mask, 1, query_inds)
+            if on_padded.any():
+                # First real (non-padded) index per scene — always exists.
+                first_real = (~padding_mask).long().argmax(dim=1, keepdim=True)
+                first_real = first_real.expand_as(query_inds)
+                query_inds = torch.where(on_padded, first_real, query_inds)
+
         query_xyz = torch.stack(
             [torch.gather(encoder_xyz[..., x], 1, query_inds) for x in range(3)],
             dim=-1,
@@ -422,10 +483,12 @@ class Model3DETRDetector(nn.Module):
         """
         point_clouds = input_dict["point_clouds"]
 
-        enc_xyz, enc_features, enc_inds = self.run_encoder(point_clouds)
-        enc_features = self.encoder_to_decoder_projection(
-            enc_features.permute(1, 2, 0)
-        ).permute(2, 0, 1)
+        enc_xyz, enc_features, enc_inds, padding_mask = self.run_encoder(
+            point_clouds
+        )
+        # enc_features: (N', B, C) → (B, C, N') for projection
+        enc_features = self.encoder_to_decoder_projection(enc_features.permute(1, 2, 0))
+        enc_features = enc_features.permute(2, 0, 1)
 
         if encoder_only:
             return enc_xyz, enc_features.transpose(0, 1)
@@ -434,14 +497,20 @@ class Model3DETRDetector(nn.Module):
             input_dict["point_cloud_dims_min"],
             input_dict["point_cloud_dims_max"],
         ]
-        query_xyz, query_embed = self.get_query_embeddings(enc_xyz, point_cloud_dims)
+        query_xyz, query_embed = self.get_query_embeddings(
+            enc_xyz, point_cloud_dims, padding_mask=padding_mask
+        )
         enc_pos = self.pos_embedding(enc_xyz, input_range=point_cloud_dims)
 
         enc_pos = enc_pos.permute(2, 0, 1)
         query_embed = query_embed.permute(2, 0, 1)
         tgt = torch.zeros_like(query_embed)
         box_features = self.decoder(
-            tgt, enc_features, query_pos=query_embed, pos=enc_pos
+            tgt,
+            enc_features,
+            query_pos=query_embed,
+            pos=enc_pos,
+            memory_key_padding_mask=padding_mask,
         )[0]
 
         box_predictions = self.get_box_predictions(

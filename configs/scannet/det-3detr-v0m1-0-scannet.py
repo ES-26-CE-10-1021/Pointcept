@@ -2,13 +2,11 @@
 3DETR on ScanNet — v0: Native 3DETR defaults
 
 Matches the native third_party/3detr training settings as closely as possible.
-Key differences from det-3detr-v1m1-0-scannet.py (documented in
-tests/test_3detr_cross_validation.py::TestConfigAudit):
-  - loss_giou_weight=0 (disabled, matching native default)
-  - loss_no_object_weight=0.2 (native default, not 0.25)
-  - Matcher costs: giou=2, center=0, objectness=0 (native defaults)
+All criterion settings match native 3DETR defaults
+(see third_party/3detr/scripts/scannet_ep1080.sh).
+Key settings:
   - 720 total epochs with cosine+warmup LR schedule (not 90 + OneCycleLR)
-  - batch_size=16 (8 per GPU on 2 GPUs, matching native's batchsize_per_gpu=8)
+  - batch_size=8 (4 per GPU on 2 GPUs, matching native's batchsize=8)
   - No AMP (native does not use mixed precision)
 
 The native paper uses 8x V100 GPUs (total batch=64). Adjust batch_size and
@@ -21,8 +19,8 @@ Usage:
 _base_ = ["../_base_/default_runtime.py"]
 
 # ── Training ─────────────────────────────────────────────────────────────────
-batch_size = 16      # total across all GPUs (8 per GPU on 2 GPUs)
-num_worker = 20      # total across all GPUs (10 per GPU on 2 GPUs)
+batch_size = 8       # total across all GPUs (4 per GPU on 2 GPUs)
+num_worker = 16      # total across all GPUs (8 per GPU on 2 GPUs)
 mix_prob = 0         # detection dataset does not support MixUp
 enable_amp = False   # native 3DETR does not use AMP
 find_unused_parameters = False
@@ -76,9 +74,9 @@ model = dict(
             cost_center=0.0,         # native default (disabled)
         ),
         loss_weight_dict=dict(
-            loss_giou_weight=0.0,    # native default (GIoU loss disabled!)
+            loss_giou_weight=1.0,    # native default
             loss_sem_cls_weight=1.0,
-            loss_no_object_weight=0.2,   # native default
+            loss_no_object_weight=0.25,  # native default
             loss_angle_cls_weight=0.1,
             loss_angle_reg_weight=0.5,
             loss_center_weight=5.0,
@@ -95,13 +93,13 @@ model = dict(
 #   Phase 1 (1.25%): lr ramps from 5e-4/500=1e-6 to 5e-4  (matches warm_lr → base_lr)
 #   Phase 2 (98.75%): lr decays from 5e-4 to 5e-4/500=1e-6 (matches base_lr → final_lr)
 epoch = 720
-eval_epoch = 10
+eval_epoch = 20
 
 optimizer = dict(type="AdamW", lr=5e-4, weight_decay=0.1)
 scheduler = dict(
     type="OneCycleLR",
     max_lr=[5e-4],
-    pct_start=0.0125,          # 9/720 = 1.25% warmup (native: warm_lr_epochs=9)
+    pct_start=0.0125,            # NOTE: The closest to native lr is 9/720 = 1.25% warmup (native: warm_lr_epochs=9) (it was found though that 0.05 was better)
     anneal_strategy="cos",
     div_factor=500.0,          # initial_lr = 5e-4 / 500 = 1e-6 (native: warm_lr)
     final_div_factor=1.0,      # final_lr = 5e-4 / 500 = 1e-6 (native: final_lr)
