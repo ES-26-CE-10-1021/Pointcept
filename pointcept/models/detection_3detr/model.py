@@ -331,7 +331,7 @@ class Model3DETRDetector(nn.Module):
             # Project to encoder_dim and convert to (N, B, C)
             pre_enc_features = self.input_projection(inp).permute(1, 0, 2)
 
-        result = self.encoder(pre_enc_features, xyz=pre_enc_xyz)
+        result = self.encoder(pre_enc_features, xyz=pre_enc_xyz, padding_mask=padding_mask)
         if isinstance(result, Point):
             # Point-returning encoder (e.g. a PTv3-based encoder component)
             enc_xyz, enc_features_dense, padding_mask = point2dense(result)

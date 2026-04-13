@@ -37,11 +37,12 @@ class IdentityEncoder3DETR(nn.Module):
     before the 3DETR decoder.
     """
 
-    def forward(self, features, xyz):
+    def forward(self, features, xyz, padding_mask=None):
         """
         Args:
             features: (npoint, B, C) point features
             xyz:      (B, npoint, 3) coordinates
+            padding_mask: ignored (passthrough encoder)
 
         Returns:
             xyz: (B, npoint, 3) unchanged
@@ -141,19 +142,21 @@ class VanillaTransformerEncoder3DETR(nn.Module):
             encoder_layer=encoder_layer, num_layers=nlayers
         )
 
-    def forward(self, features, xyz):
+    def forward(self, features, xyz, padding_mask=None):
         """
         Args:
             features: (npoint, B, C) point features
             xyz: (B, npoint, 3) coordinates
+            padding_mask: (B, npoint) bool or None. True = padded position.
 
         Returns:
             xyz: (B, npoint, 3)
             features: (npoint, B, C) encoded features
             inds: None (no downsampling)
         """
-        # TransformerEncoder.forward returns (xyz, output, xyz_inds)
-        enc_xyz, enc_features, enc_inds = self.encoder(features, xyz=xyz)
+        enc_xyz, enc_features, enc_inds = self.encoder(
+            features, xyz=xyz, src_key_padding_mask=padding_mask
+        )
         return enc_xyz, enc_features, enc_inds
 
 
@@ -216,19 +219,21 @@ class MaskedTransformerEncoder3DETR(nn.Module):
             masking_radius=masking_radius,
         )
 
-    def forward(self, features, xyz):
+    def forward(self, features, xyz, padding_mask=None):
         """
         Args:
             features: (npoint, B, C) point features
             xyz: (B, npoint, 3) coordinates
+            padding_mask: (B, npoint) bool or None. True = padded position.
 
         Returns:
             xyz: (B, npoint//2, 3) downsampled coordinates
             features: (npoint//2, B, C) encoded features
             inds: (B, npoint//2) indices of kept points
         """
-        # MaskedTransformerEncoder.forward returns (xyz, output, xyz_inds)
-        enc_xyz, enc_features, enc_inds = self.encoder(features, xyz=xyz)
+        enc_xyz, enc_features, enc_inds = self.encoder(
+            features, xyz=xyz, src_key_padding_mask=padding_mask
+        )
         return enc_xyz, enc_features, enc_inds
 
 

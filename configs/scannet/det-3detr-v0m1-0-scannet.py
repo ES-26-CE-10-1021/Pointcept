@@ -6,7 +6,7 @@ All criterion settings match native 3DETR defaults
 (see third_party/3detr/scripts/scannet_ep1080.sh).
 Key settings:
   - 720 total epochs with cosine+warmup LR schedule (not 90 + OneCycleLR)
-  - batch_size=16 (8 per GPU on 2 GPUs, matching native's batchsize_per_gpu=8)
+  - batch_size=8 (4 per GPU on 2 GPUs, matching native's batchsize=8)
   - No AMP (native does not use mixed precision)
 
 The native paper uses 8x V100 GPUs (total batch=64). Adjust batch_size and
@@ -19,7 +19,7 @@ Usage:
 _base_ = ["../_base_/default_runtime.py"]
 
 # ── Training ─────────────────────────────────────────────────────────────────
-batch_size = 8      # total across all GPUs (4 per GPU on 2 GPUs)
+batch_size = 8       # total across all GPUs (4 per GPU on 2 GPUs)
 num_worker = 16      # total across all GPUs (8 per GPU on 2 GPUs)
 mix_prob = 0         # detection dataset does not support MixUp
 enable_amp = False   # native 3DETR does not use AMP
