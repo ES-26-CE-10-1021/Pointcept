@@ -63,9 +63,8 @@ model = dict(
         type="PTv3m3PreEncoder",
         pretrained="utonia",
         grid_size=0.02,
-        freeze=True,
-        freeze_eval=True,
-        freeze_no_grad=True,
+        enc_mode=True,
+        freeze_backbone="full",
     ),
     # Vanilla Transformer encoder (no masking / downsampling). Width
     # must match Utonia's deepest-stage output.

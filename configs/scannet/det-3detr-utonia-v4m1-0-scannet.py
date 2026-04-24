@@ -1,20 +1,19 @@
 """
-3DETR on ScanNet — Utonia (PT-v3m3) frozen pre-encoder, v2.
+3DETR on ScanNet — Utonia (PT-v3m3) frozen pre-encoder + FPS, v4m1.
 
-v2 = v1 + Utonia-canonical preprocessing (scale 0.5, CenterShift z+, grid
-0.01), color and normals both absent → PT-v3m3 receives XYZ only with
-zero-padded RGB and normal slots.
+v4m1 = v3m1-0 + FPS downsampling to a fixed 2048 tokens per scene. The
+Utonia encoder still runs in encoder-only mode (``enc_mode=True``); its
+variable-length per-scene output is then FPS-downsampled to a fixed
+budget that matches ``det-3detr-v3m1-1-scannet.py``'s token count —
+enabling a direct, token-budget-matched comparison against
+``det-3detr-utonia-v4m2-0-scannet.py`` (full U-Net + FPS).
 
-Differences from ``det-3detr-utonia-v1m1-0-scannet.py``:
-  - ``pre_encoder.grid_size = 0.01``  (matches voxel topology after 0.5× scale)
-  - ``data.*.utonia_preprocess = True``  (scale 0.5 + CenterShift before aug)
-  - ``data.*.use_color = False``  (same as v1; listed explicitly for clarity)
-
-Normals are never loaded by the detection dataset; their slots are zero-padded
-on-device by ``PTv3m3PreEncoder._build_padded_feat``.
+Key differences from ``det-3detr-utonia-v3m1-0-scannet.py``:
+  - ``pre_encoder.npoint = 2048``  (FPS after backbone → fixed-length output)
+  - ``pre_encoder.freeze_backbone = "full"``  (replaces old freeze* bools)
 
 Usage:
-    sh scripts/train.sh -d scannet -c det-3detr-utonia-v2m1-0-scannet -n my_exp -g 4
+    sh scripts/train.sh -d scannet -c det-3detr-utonia-v4m1-0-scannet -n my_exp -g 4
 """
 
 _base_ = ["../_base_/default_runtime.py"]
@@ -38,6 +37,7 @@ model = dict(
         pretrained="utonia",
         grid_size=0.01,
         enc_mode=True,
+        npoint=2048,
         freeze_backbone="full",
     ),
     encoder=dict(
@@ -63,6 +63,9 @@ model = dict(
     num_queries=256,
     position_embedding="fourier",
     mlp_dropout=0.3,
+    # LN is kept (instead of BN) for parity with the v1/v2/v3 utonia configs.
+    # FPS makes the output fixed-length so BN would also work, but LN costs
+    # nothing extra and keeps the utonia family consistent.
     projection_norm="ln",
     criterion=dict(
         type="SetCriterion3DETR",
@@ -120,7 +123,7 @@ data = dict(
         meta_data_dir=meta_data_dir,
         split="train",
         num_points=40000,
-        use_color=False,
+        use_color=True,
         use_height=False,
         augment=True,
         random_cuboid_min_points=30000,
@@ -132,7 +135,7 @@ data = dict(
         meta_data_dir=meta_data_dir,
         split="val",
         num_points=40000,
-        use_color=False,
+        use_color=True,
         use_height=False,
         augment=False,
         utonia_preprocess=True,
@@ -143,7 +146,7 @@ data = dict(
         meta_data_dir=meta_data_dir,
         split="val",
         num_points=40000,
-        use_color=False,
+        use_color=True,
         use_height=False,
         augment=False,
         utonia_preprocess=True,

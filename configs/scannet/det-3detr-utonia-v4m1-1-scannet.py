@@ -1,20 +1,24 @@
 """
-3DETR on ScanNet — Utonia (PT-v3m3) frozen pre-encoder, v2.
+3DETR on ScanNet — Utonia (PT-v3m3) full U-Net frozen pre-encoder + FPS, v4m2.
 
-v2 = v1 + Utonia-canonical preprocessing (scale 0.5, CenterShift z+, grid
-0.01), color and normals both absent → PT-v3m3 receives XYZ only with
-zero-padded RGB and normal slots.
+v4m2 = v4m1 with ``enc_mode=False``: the full pretrained Utonia U-Net
+(encoder + decoder) runs frozen, emitting high-resolution per-point
+features at the shallowest decoder stage. These are then FPS-downsampled
+to the same 2048-token budget as v4m1 so the two configs can be compared
+head-to-head: *"does the decoder's skip-connected detail improve
+detection once token count is held fixed?"*
 
-Differences from ``det-3detr-utonia-v1m1-0-scannet.py``:
-  - ``pre_encoder.grid_size = 0.01``  (matches voxel topology after 0.5× scale)
-  - ``data.*.utonia_preprocess = True``  (scale 0.5 + CenterShift before aug)
-  - ``data.*.use_color = False``  (same as v1; listed explicitly for clarity)
-
-Normals are never loaded by the detection dataset; their slots are zero-padded
-on-device by ``PTv3m3PreEncoder._build_padded_feat``.
+Key differences from ``det-3detr-utonia-v4m1-0-scannet.py``:
+  - ``pre_encoder.enc_mode = False``  (run Utonia's decoder)
+  - ``encoder.encoder_dim`` / ``model.encoder_dim = UTONIA_DEC_DIM = 54``
+    (PT-v3m3 ScanNet ``dec_channels[0]``, see
+    ``configs/utonia/semseg-utonia-v1m1-0b-scannet-dec.py:26``)
+  - ``pre_encoder.freeze_backbone = "full"`` still — both the encoder
+    and the decoder are frozen. Fine-tuning the decoder is out of scope
+    for this experiment.
 
 Usage:
-    sh scripts/train.sh -d scannet -c det-3detr-utonia-v2m1-0-scannet -n my_exp -g 4
+    sh scripts/train.sh -d scannet -c det-3detr-utonia-v4m2-0-scannet -n my_exp -g 4
 """
 
 _base_ = ["../_base_/default_runtime.py"]
@@ -27,8 +31,9 @@ enable_amp = False
 find_unused_parameters = False
 clip_grad = 0.1
 
-# Utonia's deepest-stage output width (PT-v3m3 enc_channels[-1]).
-UTONIA_ENC_DIM = 576
+# Utonia's shallowest decoder stage output width (PT-v3m3 dec_channels[0]).
+# Source: configs/utonia/semseg-utonia-v1m1-0b-scannet-dec.py:26.
+UTONIA_DEC_DIM = 54
 
 # ── Model ─────────────────────────────────────────────────────────────────────
 model = dict(
@@ -37,12 +42,13 @@ model = dict(
         type="PTv3m3PreEncoder",
         pretrained="utonia",
         grid_size=0.01,
-        enc_mode=True,
+        enc_mode=False,
+        npoint=2048,
         freeze_backbone="full",
     ),
     encoder=dict(
         type="VanillaTransformerEncoder3DETR",
-        encoder_dim=UTONIA_ENC_DIM,
+        encoder_dim=UTONIA_DEC_DIM,
         nhead=4,
         nlayers=3,
         ffn_dim=128,
@@ -58,7 +64,7 @@ model = dict(
         dropout=0.1,
     ),
     dataset_config=dict(type="ScanNetDetectionConfig"),
-    encoder_dim=UTONIA_ENC_DIM,
+    encoder_dim=UTONIA_DEC_DIM,
     decoder_dim=256,
     num_queries=256,
     position_embedding="fourier",
@@ -120,7 +126,7 @@ data = dict(
         meta_data_dir=meta_data_dir,
         split="train",
         num_points=40000,
-        use_color=False,
+        use_color=True,
         use_height=False,
         augment=True,
         random_cuboid_min_points=30000,
@@ -132,7 +138,7 @@ data = dict(
         meta_data_dir=meta_data_dir,
         split="val",
         num_points=40000,
-        use_color=False,
+        use_color=True,
         use_height=False,
         augment=False,
         utonia_preprocess=True,
@@ -143,7 +149,7 @@ data = dict(
         meta_data_dir=meta_data_dir,
         split="val",
         num_points=40000,
-        use_color=False,
+        use_color=True,
         use_height=False,
         augment=False,
         utonia_preprocess=True,

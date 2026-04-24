@@ -5,18 +5,22 @@ axis-aligned object detection on ScanNet.
 
 ## Config summary
 
-| Config           | Pre-Encoder                     | pre_enc out dim | Encoder                 | encoder_dim | decoder_dim | Epochs | Purpose                            |
-| ---------------- | ------------------------------- | --------------- | ----------------------- | ----------- | ----------- | ------ | ---------------------------------- |
-| **v0m1-0**       | PointNet++ SA (2048 pts)        | 256             | VanillaTransformer (3L) | 256         | 256         | 720    | Native 3DETR baseline              |
-| **v0m1-0-180ep** | _(inherits v0)_                 | 256             | _(inherits v0)_         | 256         | 256         | 180    | Shortened v0 for quick comparison  |
-| **v1m1-0**       | PointNet++ SA (2048 pts)        | 256             | VanillaTransformer (3L) | 256         | 256         | 90     | Pointcept integration sanity check |
-| **v2m1-0**       | PTv3 (enc→512)                  | 512             | IdentityEncoder         | 512         | 256         | 720    | PTv3; no transformer encoder       |
-| **v2m1-0-180ep** | PTv3 (enc→512)                  | 512             | IdentityEncoder         | 512         | 256         | 180    | Shortened v2 for quick comparison  |
-| **v3m1-0**       | PTv3 (enc→512)                  | 512             | VanillaTransformer (3L) | 512         | 256         | 720    | PTv3 + transformer encoder         |
-| **v3m1-1**       | PTv3 (enc→256) + FPS (2048 pts) | 256             | VanillaTransformer (3L) | 256         | 256         | 720    | PTv3 + FPS to fixed-length output  |
-| **v4m1-0**       | PTv3UNet (dec→64)               | 64              | IdentityEncoder         | 64          | 256         | 720    | PTv3 U-Net; no transformer encoder |
-| **v4m1-1**       | PTv3UNet (dec→64)               | 64              | VanillaTransformer (3L) | 64          | 256         | 720    | PTv3 U-Net + transformer encoder   |
-| **utonia-v1m1-0**| Frozen Utonia PT-v3m3 (enc→576) | 576             | VanillaTransformer (3L) | 576         | 256         | 720    | Frozen pretrained Utonia VFM       |
+| Config            | Pre-Encoder                         | pre_enc out dim | Encoder                 | encoder_dim | decoder_dim | Epochs | Purpose                                                |
+| ----------------- | ----------------------------------- | --------------- | ----------------------- | ----------- | ----------- | ------ | ------------------------------------------------------ |
+| **v0m1-0**        | PointNet++ SA (2048 pts)            | 256             | VanillaTransformer (3L) | 256         | 256         | 720    | Native 3DETR baseline                                  |
+| **v0m1-0-180ep**  | _(inherits v0)_                     | 256             | _(inherits v0)_         | 256         | 256         | 180    | Shortened v0 for quick comparison                      |
+| **v1m1-0**        | PointNet++ SA (2048 pts)            | 256             | VanillaTransformer (3L) | 256         | 256         | 90     | Pointcept integration sanity check                     |
+| **v2m1-0**        | PTv3 (enc→512)                      | 512             | IdentityEncoder         | 512         | 256         | 720    | PTv3; no transformer encoder                           |
+| **v2m1-0-180ep**  | PTv3 (enc→512)                      | 512             | IdentityEncoder         | 512         | 256         | 180    | Shortened v2 for quick comparison                      |
+| **v3m1-0**        | PTv3 (enc→512)                      | 512             | VanillaTransformer (3L) | 512         | 256         | 720    | PTv3 + transformer encoder                             |
+| **v3m1-1**        | PTv3 (enc→256) + FPS (2048 pts)     | 256             | VanillaTransformer (3L) | 256         | 256         | 720    | PTv3 + FPS to fixed-length output                      |
+| **v4m1-0**        | PTv3UNet (dec→64)                   | 64              | IdentityEncoder         | 64          | 256         | 720    | PTv3 U-Net; no transformer encoder                     |
+| **v4m1-1**        | PTv3UNet (dec→64)                   | 64              | VanillaTransformer (3L) | 64          | 256         | 720    | PTv3 U-Net + transformer encoder                       |
+| **utonia-v1m1-0** | Frozen Utonia PT-v3m3 (enc→576)     | 576             | VanillaTransformer (3L) | 576         | 256         | 720    | Frozen pretrained Utonia VFM                           |
+| **utonia-v2m1-0** | Frozen Utonia PT-v3m3 (enc→576)     | 576             | VanillaTransformer (3L) | 576         | 256         | 720    | v1 + Utonia-canonical preprocessing                    |
+| **utonia-v3m1-0** | Frozen Utonia PT-v3m3 (enc→576)     | 576             | VanillaTransformer (3L) | 576         | 256         | 720    | v2 + RGB input                                         |
+| **utonia-v4m1-0** | Frozen Utonia enc-only + FPS 2048   | 576             | VanillaTransformer (3L) | 576         | 256         | 720    | Utonia enc-only + fixed-length FPS                     |
+| **utonia-v4m1-1** | Frozen Utonia full U-Net + FPS 2048 | 54              | VanillaTransformer (3L) | 54          | 256         | 720    | Utonia full U-Net + FPS (token-budget-matched to v4m1) |
 
 **Encoder layers**: "(3L)" means 3 transformer layers (`nlayers=3`). The decoder always uses 8 layers.
 
@@ -80,9 +84,43 @@ encoder, decoder, and MLP heads are trained — the Utonia weights are never
 updated. Utonia's 9-dim `[xyz, rgb, normal]` input contract is honoured by
 zero-padding the missing modalities on-device (Causal Modality Blinding makes
 this tolerable). The frozen backbone runs under `torch.no_grad()` for VRAM
-savings and forced eval mode for feature determinism. Same 3-layer vanilla
+savings and forced eval mode for feature determinism (controlled by the single
+`freeze_backbone="full"` enum on `PTv3m3PreEncoder`). Same 3-layer vanilla
 transformer encoder as v3m1-0, but widened to `encoder_dim=576` to match
 Utonia's deepest-stage output.
+
+### utonia-v2m1-0 — v1 + Utonia-canonical preprocessing
+
+Identical model to v1 but threads Utonia's pretraining-time preprocessing
+(`RandomScale=0.5` + `CenterShift(apply_z=True)`, `grid_size=0.01`) into the
+detection dataset via `utonia_preprocess=True`. Tests whether matching Utonia's
+training-time point distribution improves its frozen features' utility for
+detection. Still XYZ-only — RGB/normal slots stay zero-padded.
+
+### utonia-v3m1-0 — v2 + RGB input
+
+Adds `use_color=True` with Utonia-style `rgb/255` normalization so RGB flows
+into Utonia's RGB input slots. Normals are still absent and zero-padded.
+Tests whether restoring one of Utonia's three pretraining modalities narrows
+the gap to the fully-populated VFM setting.
+
+### utonia-v4m1-0 — Frozen Utonia encoder-only + FPS(2048)
+
+v3m1-0 with FPS downsampling of the variable-length Utonia encoder output to
+a fixed 2048-token budget. Eliminates the padding mask on the transformer
+encoder / decoder side and matches `det-3detr-v3m1-1-scannet.py`'s token
+count — the encoder-only counterpart in a controlled comparison against
+v4m1-01.
+
+### utonia-v4m1-1 — Frozen Utonia full U-Net + FPS(2048)
+
+v4m1 with `enc_mode=False` — the full Utonia U-Net (encoder + decoder) runs
+frozen, emitting shallowest-stage decoder features (`dec_channels[0]=54`).
+Those are FPS-downsampled to the same 2048-token budget as v4m1. Directly
+tests whether the decoder's skip-connected, high-resolution features help
+3DETR once token count is held fixed. Both encoder and decoder are frozen
+(`freeze_backbone="full"`); fine-tuning the decoder is left for a future
+experiment.
 
 ## Shared settings
 
@@ -112,5 +150,5 @@ All configs share these settings (matching native 3DETR where applicable):
  Utonia (frozen m3) ─┘
 ```
 
-- **Variable-length path** (v2, v3m1-0, v4m1-0, v4m1-1, utonia-v1m1-0): padding_mask + LN projection
-- **Fixed-length path** (v0, v1, v3m1-1): no padding needed
+- **Variable-length path** (v2, v3m1-0, v4m1-0, v4m1-1, utonia-v1m1-0, utonia-v2m1-0, utonia-v3m1-0): padding_mask + LN projection
+- **Fixed-length path** (v0, v1, v3m1-1, utonia-v4m1-0, utonia-v4m1-1): no padding needed

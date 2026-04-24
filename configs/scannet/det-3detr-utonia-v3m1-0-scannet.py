@@ -37,9 +37,8 @@ model = dict(
         type="PTv3m3PreEncoder",
         pretrained="utonia",
         grid_size=0.01,
-        freeze=True,
-        freeze_eval=True,
-        freeze_no_grad=True,
+        enc_mode=True,
+        freeze_backbone="full",
     ),
     encoder=dict(
         type="VanillaTransformerEncoder3DETR",
