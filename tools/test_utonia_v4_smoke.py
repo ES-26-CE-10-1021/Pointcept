@@ -42,7 +42,7 @@ TINY_ENC_KWARGS = dict(
     order=("z", "z-trans", "hilbert", "hilbert-trans"),
     stride=(2, 2, 2, 2),
     enc_depths=(1, 1, 1, 1, 1),
-    enc_channels=(8, 16, 32, 64, 64),
+    enc_channels=(12, 24, 48, 96, 96),
     enc_num_head=(1, 1, 1, 1, 1),
     enc_patch_size=(64, 64, 64, 64, 64),
     mlp_ratio=2,
@@ -56,7 +56,7 @@ TINY_ENC_KWARGS = dict(
 
 TINY_DEC_KWARGS = dict(
     dec_depths=(1, 1, 1, 1),
-    dec_channels=(8, 16, 32, 64),
+    dec_channels=(12, 24, 48, 96),
     dec_num_head=(1, 1, 1, 1),
     dec_patch_size=(64, 64, 64, 64),
 )
@@ -182,7 +182,7 @@ def test_config_loader():
         ("det-3detr-utonia-v2m1-0-scannet.py", dict(enc_mode=True, freeze_backbone="full"), None),
         ("det-3detr-utonia-v3m1-0-scannet.py", dict(enc_mode=True, freeze_backbone="full"), None),
         ("det-3detr-utonia-v4m1-0-scannet.py", dict(enc_mode=True, freeze_backbone="full"), 2048),
-        ("det-3detr-utonia-v4m2-0-scannet.py", dict(enc_mode=False, freeze_backbone="full"), 2048),
+        ("det-3detr-utonia-v4m1-1-scannet.py", dict(enc_mode=False, freeze_backbone="full"), 2048),
     ]
     ok = True
     for name, expected_pre_encoder, expected_npoint in configs:
