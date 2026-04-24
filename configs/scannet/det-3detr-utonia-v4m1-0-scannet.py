@@ -2,15 +2,15 @@
 3DETR on ScanNet — Utonia (PT-v3m3) frozen pre-encoder + FPS, v4m1.
 
 v4m1 = v3m1-0 + FPS downsampling to a fixed 2048 tokens per scene. The
-Utonia encoder still runs in encoder-only mode (``enc_mode=True``); its
+Utonia encoder runs in encoder-only mode (``enc_mode=True``); its
 variable-length per-scene output is then FPS-downsampled to a fixed
-budget that matches ``det-3detr-v3m1-1-scannet.py``'s token count —
-enabling a direct, token-budget-matched comparison against
-``det-3detr-utonia-v4m2-0-scannet.py`` (full U-Net + FPS).
+budget that matches ``det-3detr-v3m1-1-scannet.py``'s token count.
+Caps the strictly-frozen-VFM line — for partial fine-tuning variants,
+see the v5 family (``det-3detr-utonia-v5m1-*`` / ``v5m2-*``).
 
 Key differences from ``det-3detr-utonia-v3m1-0-scannet.py``:
   - ``pre_encoder.npoint = 2048``  (FPS after backbone → fixed-length output)
-  - ``pre_encoder.freeze_backbone = "full"``  (replaces old freeze* bools)
+  - ``pre_encoder.freeze_backbone = "enc"``  (embedding + encoder frozen)
 
 Usage:
     sh scripts/train.sh -d scannet -c det-3detr-utonia-v4m1-0-scannet -n my_exp -g 4
@@ -38,7 +38,7 @@ model = dict(
         grid_size=0.01,
         enc_mode=True,
         npoint=2048,
-        freeze_backbone="full",
+        freeze_backbone="enc",
     ),
     encoder=dict(
         type="VanillaTransformerEncoder3DETR",

@@ -199,7 +199,7 @@ def _ddp_safe_utonia_load(pretrained, download_root):
     )
 
 
-_FREEZE_MODES = ("full", "enc", "none")
+_FREEZE_MODES = ("enc", "enc_finetune", "none")
 
 
 @MODULES.register_module("PTv3m3PreEncoder")
@@ -219,18 +219,21 @@ class PTv3m3PreEncoder(PointTransformerV3m3):
 
     **Freeze semantics** are controlled by ``freeze_backbone``:
 
-    - ``"full"``: embedding + encoder + decoder (if present) are frozen
-      (``requires_grad=False``), held in ``eval()`` mode, and the forward
-      runs under ``torch.no_grad()``. The output leaf is detached and
-      ``requires_grad_(True)`` is flipped on so downstream 3DETR layers
-      can attach a fresh graph. Use for a pure frozen VFM.
-    - ``"enc"``: embedding + encoder frozen (as above), decoder remains
-      trainable. The encoder runs under ``no_grad`` for VRAM, then the
-      feature tensor is detached + re-enabled for grad, and the decoder
-      runs outside the ``no_grad`` block so it can build a graph.
-      Only meaningful with ``enc_mode=False``.
-    - ``"none"``: nothing frozen; full gradient flow through the backbone
-      (for future fine-tune variants).
+    - ``"enc"``: embedding + encoder are frozen (``requires_grad=False``,
+      held in ``eval()`` mode, forward under ``torch.no_grad()``). The
+      decoder, when present (``enc_mode=False``), remains trainable — the
+      encoder output leaf is detached + ``requires_grad_(True)`` so the
+      decoder can build a fresh graph. Default.
+    - ``"enc_finetune"``: embedding + all-but-last encoder stages frozen;
+      the **last encoder stage** remains trainable. The frozen prefix runs
+      under ``no_grad`` for VRAM, then the leaf is bridged and the last
+      stage (and decoder, if present) build a real graph.
+    - ``"none"``: nothing frozen; full gradient flow through the backbone.
+
+    Note: the distributed Utonia checkpoint is encoder-only (``dec_*``
+    fields are ``None``). With ``enc_mode=False`` you are building and
+    training a **fresh, randomly-initialized** decoder on top of the
+    frozen encoder — supply ``dec_*`` kwargs explicitly in your config.
 
     Args:
         pretrained (str | None): HuggingFace model name (e.g. ``"utonia"``)
@@ -265,7 +268,7 @@ class PTv3m3PreEncoder(PointTransformerV3m3):
         pretrained="utonia",
         download_root=None,
         config_overrides=None,
-        freeze_backbone="full",
+        freeze_backbone="enc",
         grid_size=0.02,
         npoint=None,
         enc_mode=True,
@@ -281,11 +284,13 @@ class PTv3m3PreEncoder(PointTransformerV3m3):
         # checkpoint config > backbone defaults.
         ckpt_state_dict = None
         ckpt_in_channels = None
+        ckpt_enc_mode = None
         if pretrained:
             ckpt = _ddp_safe_utonia_load(pretrained, download_root)
             base_config = dict(ckpt["config"])
             ckpt_state_dict = ckpt["state_dict"]
             ckpt_in_channels = base_config.get("in_channels")
+            ckpt_enc_mode = base_config.get("enc_mode")
         else:
             base_config = {}
 
@@ -309,9 +314,10 @@ class PTv3m3PreEncoder(PointTransformerV3m3):
         # enc_mode is the one architecture knob we pin from the wrapper
         # signature so downstream configs can flip it without reaching
         # into config_overrides. freeze_encoder is wired from the high-
-        # level freeze_backbone enum.
+        # level freeze_backbone enum; "enc_finetune" still freezes via
+        # the base class, then we unfreeze the last stage below.
         base_config["enc_mode"] = bool(enc_mode)
-        base_config["freeze_encoder"] = freeze_backbone in ("full", "enc")
+        base_config["freeze_encoder"] = freeze_backbone in ("enc", "enc_finetune")
 
         super().__init__(**base_config)
 
@@ -319,16 +325,19 @@ class PTv3m3PreEncoder(PointTransformerV3m3):
         self.npoint = npoint
         self.freeze_backbone = freeze_backbone
         self._pretrained = pretrained
+        # Stash the ckpt's original enc_mode so _load_pretrained_state can
+        # recognize "ckpt was enc-only, user built full U-Net" and treat
+        # the missing dec.* keys as expected (fresh decoder).
+        self._ckpt_enc_mode = ckpt_enc_mode
 
         if ckpt_state_dict is not None:
             self._load_pretrained_state(ckpt_state_dict)
 
-        # Under "full", extend the base-class freeze (which covers enc
-        # only) to the decoder as well, so the entire VFM is a pure
-        # feature extractor.
-        if self.freeze_backbone == "full" and not self.enc_mode:
-            for p in self.dec.parameters():
-                p.requires_grad = False
+        # "enc_finetune": undo the base class's freeze on the last encoder
+        # stage so it trains end-to-end with the downstream heads.
+        if self.freeze_backbone == "enc_finetune":
+            for p in self.enc[-1].parameters():
+                p.requires_grad = True
 
         # Put the frozen blocks into eval mode immediately so a caller
         # that never calls .train() still sees deterministic features.
@@ -348,6 +357,29 @@ class PTv3m3PreEncoder(PointTransformerV3m3):
         incompatible = self.load_state_dict(state_dict, strict=False)
         missing = list(incompatible.missing_keys)
         unexpected = list(incompatible.unexpected_keys)
+
+        # Fresh-decoder configs (ckpt saved with enc_mode=True, user built
+        # with enc_mode=False) will report every dec.* parameter as missing.
+        # That's intentional — the decoder is trained from scratch — so drop
+        # them from the missing list and log at INFO instead of raising.
+        dec_missing = []
+        if (
+            self._ckpt_enc_mode is True
+            and not self.enc_mode
+            and hasattr(self, "dec")
+        ):
+            dec_missing = [k for k in missing if k.startswith("dec.")]
+            missing = [k for k in missing if not k.startswith("dec.")]
+            if dec_missing:
+                _logger.info(
+                    "PTv3m3PreEncoder: %d decoder key(s) missing from the "
+                    "checkpoint — decoder will train from random "
+                    "initialization: %s%s",
+                    len(dec_missing),
+                    dec_missing[:4],
+                    " ..." if len(dec_missing) > 4 else "",
+                )
+
         if missing:
             raise RuntimeError(
                 f"PTv3m3PreEncoder: {len(missing)} key(s) missing from the "
@@ -375,13 +407,14 @@ class PTv3m3PreEncoder(PointTransformerV3m3):
         The default ``nn.Module.train()`` recursively flips every
         submodule, which would re-enable dropout / drop_path inside the
         frozen backbone on every step — nondeterministic features for
-        identical inputs.
+        identical inputs. Under ``"enc_finetune"`` the last encoder stage
+        must follow the outer module's train/eval state.
         """
-        if self.freeze_backbone in ("full", "enc"):
+        if self.freeze_backbone in ("enc", "enc_finetune"):
             self.embedding.eval()
             self.enc.eval()
-        if self.freeze_backbone == "full" and not self.enc_mode:
-            self.dec.eval()
+        if self.freeze_backbone == "enc_finetune":
+            self.enc[-1].train(self.training)
 
     def train(self, mode=True):
         """Override ``train()`` so the frozen blocks stay in eval mode."""
@@ -458,9 +491,35 @@ class PTv3m3PreEncoder(PointTransformerV3m3):
         point = dense2point(xyz, feat_padded)
         point["grid_size"] = self.grid_size
 
-        wrap = self.freeze_backbone in ("full", "enc")
-        enc_ctx = torch.no_grad() if wrap else contextlib.nullcontext()
-        with enc_ctx:
+        if self.freeze_backbone == "enc_finetune":
+            # Frozen prefix (embedding + all-but-last enc stages) under
+            # no_grad for VRAM; bridge the leaf; trainable last stage
+            # builds a fresh graph.
+            with torch.no_grad():
+                point.serialization(
+                    order=self.order, shuffle_orders=self.shuffle_orders
+                )
+                point.sparsify()
+                point = self.embedding(point)
+                for _, stage in list(self.enc.named_children())[:-1]:
+                    point = stage(point)
+            self._bridge_leaf(point)
+            point = self.enc[-1](point)
+        elif self.freeze_backbone == "enc":
+            with torch.no_grad():
+                point.serialization(
+                    order=self.order, shuffle_orders=self.shuffle_orders
+                )
+                point.sparsify()
+                point = self.embedding(point)
+                point = self.enc(point)
+            # If a trainable decoder follows, bridge here so it builds a
+            # graph. Otherwise (enc_mode=True) bridge *after* this block
+            # so the final output leaf carries requires_grad for the
+            # downstream 3DETR layers.
+            if not self.enc_mode:
+                self._bridge_leaf(point)
+        else:  # "none"
             point.serialization(
                 order=self.order, shuffle_orders=self.shuffle_orders
             )
@@ -468,26 +527,14 @@ class PTv3m3PreEncoder(PointTransformerV3m3):
             point = self.embedding(point)
             point = self.enc(point)
 
+        # Decoder (when present) is always trainable — fresh weights on
+        # top of whatever the encoder produced.
         if not self.enc_mode:
-            # "enc" freeze: bridge leaf so dec builds a real graph.
-            # "full" freeze: stay under no_grad — run dec inside a second
-            # no_grad block and bridge after.
-            if self.freeze_backbone == "enc":
-                self._bridge_leaf(point)
-                point = self.dec(point)
-            elif self.freeze_backbone == "full":
-                with torch.no_grad():
-                    point = self.dec(point)
-            else:
-                point = self.dec(point)
+            point = self.dec(point)
 
-        # After all backbone work, if we ran under no_grad anywhere that
-        # touches the output leaf, bridge it so downstream layers can
-        # attach a graph.
-        if self.freeze_backbone == "full":
-            self._bridge_leaf(point)
-        elif self.freeze_backbone == "enc" and self.enc_mode:
-            # Encoder-only + "enc" freeze: same story as "full" here.
+        # Encoder-only + "enc": nothing has built a graph on point.feat
+        # yet. Bridge so downstream 3DETR layers can attach.
+        if self.freeze_backbone == "enc" and self.enc_mode:
             self._bridge_leaf(point)
 
         if self.npoint is None:

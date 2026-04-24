@@ -38,7 +38,7 @@ model = dict(
         pretrained="utonia",
         grid_size=0.01,
         enc_mode=True,
-        freeze_backbone="full",
+        freeze_backbone="enc",
     ),
     encoder=dict(
         type="VanillaTransformerEncoder3DETR",

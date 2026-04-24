@@ -20,7 +20,10 @@ axis-aligned object detection on ScanNet.
 | **utonia-v2m1-0** | Frozen Utonia PT-v3m3 (enc→576)     | 576             | VanillaTransformer (3L) | 576         | 256         | 720    | v1 + Utonia-canonical preprocessing                    |
 | **utonia-v3m1-0** | Frozen Utonia PT-v3m3 (enc→576)     | 576             | VanillaTransformer (3L) | 576         | 256         | 720    | v2 + RGB input                                         |
 | **utonia-v4m1-0** | Frozen Utonia enc-only + FPS 2048   | 576             | VanillaTransformer (3L) | 576         | 256         | 720    | Utonia enc-only + fixed-length FPS                     |
-| **utonia-v4m1-1** | Frozen Utonia full U-Net + FPS 2048 | 54              | VanillaTransformer (3L) | 54          | 256         | 720    | Utonia full U-Net + FPS (token-budget-matched to v4m1) |
+| **utonia-v5m1-0** | Utonia, last enc stage trainable    | 576             | VanillaTransformer (3L) | 576         | 256         | 720    | Fine-tune Utonia's last encoder stage                  |
+| **utonia-v5m1-1** | Utonia, last enc stage + FPS 2048   | 576             | VanillaTransformer (3L) | 576         | 256         | 720    | v5m1-0 + fixed-length FPS                              |
+| **utonia-v5m2-0** | Frozen Utonia enc + fresh PTv3 dec  | 54              | VanillaTransformer (3L) | 54          | 256         | 720    | Learn a fresh decoder on frozen Utonia features        |
+| **utonia-v5m2-1** | Frozen Utonia enc + fresh dec + FPS | 54              | VanillaTransformer (3L) | 54          | 256         | 720    | v5m2-0 + fixed-length FPS                              |
 
 **Encoder layers**: "(3L)" means 3 transformer layers (`nlayers=3`). The decoder always uses 8 layers.
 
@@ -85,7 +88,7 @@ updated. Utonia's 9-dim `[xyz, rgb, normal]` input contract is honoured by
 zero-padding the missing modalities on-device (Causal Modality Blinding makes
 this tolerable). The frozen backbone runs under `torch.no_grad()` for VRAM
 savings and forced eval mode for feature determinism (controlled by the single
-`freeze_backbone="full"` enum on `PTv3m3PreEncoder`). Same 3-layer vanilla
+`freeze_backbone="enc"` enum on `PTv3m3PreEncoder`). Same 3-layer vanilla
 transformer encoder as v3m1-0, but widened to `encoder_dim=576` to match
 Utonia's deepest-stage output.
 
@@ -109,18 +112,39 @@ the gap to the fully-populated VFM setting.
 v3m1-0 with FPS downsampling of the variable-length Utonia encoder output to
 a fixed 2048-token budget. Eliminates the padding mask on the transformer
 encoder / decoder side and matches `det-3detr-v3m1-1-scannet.py`'s token
-count — the encoder-only counterpart in a controlled comparison against
-v4m1-01.
+count. Terminates the strictly-frozen-VFM line of experiments (v1–v4); the
+v5 family below explores partial fine-tuning.
 
-### utonia-v4m1-1 — Frozen Utonia full U-Net + FPS(2048)
+### utonia-v5 family — partial fine-tuning
 
-v4m1 with `enc_mode=False` — the full Utonia U-Net (encoder + decoder) runs
-frozen, emitting shallowest-stage decoder features (`dec_channels[0]=54`).
-Those are FPS-downsampled to the same 2048-token budget as v4m1. Directly
-tests whether the decoder's skip-connected, high-resolution features help
-3DETR once token count is held fixed. Both encoder and decoder are frozen
-(`freeze_backbone="full"`); fine-tuning the decoder is left for a future
-experiment.
+The Utonia checkpoint is encoder-only (`dec_*=None` in the saved config),
+so v5 explores two orthogonal ways of *relaxing* the freeze on top of
+Utonia's pretrained encoder, each at two token budgets:
+
+|         | no FPS (variable-length) | FPS 2048 (fixed-length) |
+|---------|---------------------------|--------------------------|
+| last enc stage trainable | **v5m1-0** | **v5m1-1** |
+| whole enc frozen + fresh PTv3 decoder | **v5m2-0** | **v5m2-1** |
+
+#### utonia-v5m1-0 / -1 — last encoder stage fine-tuned
+
+`freeze_backbone="enc_finetune"`: embedding + encoder stages 0..N-2 stay
+frozen and in `eval()` (forward runs under `torch.no_grad()` for VRAM);
+the last encoder stage is `train()` mode and `requires_grad=True`. A
+leaf-bridge on `point.feat` between the frozen prefix and the trainable
+last stage starts a fresh autograd graph so backprop reaches the last
+stage (and the 3DETR head) but stops before the frozen parameters.
+v5m1-1 adds FPS(2048) to get a fixed-length token budget.
+
+#### utonia-v5m2-0 / -1 — frozen encoder + fresh PTv3 decoder
+
+`enc_mode=False` with `freeze_backbone="enc"`: the Utonia encoder runs
+frozen under `torch.no_grad()`, then a **randomly-initialized** PTv3
+decoder (built from the explicit `dec_*` kwargs in the config —
+`dec_channels=(54, 108, 216, 432)` with head_dim=18 to satisfy 3D-RoPE)
+trains from scratch on top. `_load_pretrained_state` logs every `dec.*`
+key as expected-missing at INFO — that is intentional, not an error.
+v5m2-1 adds FPS(2048).
 
 ## Shared settings
 
@@ -150,5 +174,5 @@ All configs share these settings (matching native 3DETR where applicable):
  Utonia (frozen m3) ─┘
 ```
 
-- **Variable-length path** (v2, v3m1-0, v4m1-0, v4m1-1, utonia-v1m1-0, utonia-v2m1-0, utonia-v3m1-0): padding_mask + LN projection
-- **Fixed-length path** (v0, v1, v3m1-1, utonia-v4m1-0, utonia-v4m1-1): no padding needed
+- **Variable-length path** (v2, v3m1-0, v4m1-0, v4m1-1, utonia-v1m1-0, utonia-v2m1-0, utonia-v3m1-0, utonia-v5m1-0, utonia-v5m2-0): padding_mask + LN projection
+- **Fixed-length path** (v0, v1, v3m1-1, utonia-v4m1-0, utonia-v5m1-1, utonia-v5m2-1): no padding needed

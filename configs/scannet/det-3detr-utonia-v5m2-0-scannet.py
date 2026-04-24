@@ -1,38 +1,43 @@
 """
-3DETR on ScanNet — Utonia (PT-v3m3) full U-Net frozen pre-encoder + FPS, v4m2.
+3DETR on ScanNet — Utonia frozen encoder + fresh trainable PTv3 decoder, v5m2-0.
 
-v4m2 = v4m1 with ``enc_mode=False``: the full pretrained Utonia U-Net
-(encoder + decoder) runs frozen, emitting high-resolution per-point
-features at the shallowest decoder stage. These are then FPS-downsampled
-to the same 2048-token budget as v4m1 so the two configs can be compared
-head-to-head: *"does the decoder's skip-connected detail improve
-detection once token count is held fixed?"*
+v5m2 tests "attach a randomly-initialized PTv3 decoder to the frozen
+Utonia encoder." The Utonia checkpoint is encoder-only, so there are no
+pretrained decoder weights — the decoder is constructed with the
+hyperparameters below and trains from scratch end-to-end alongside the
+3DETR head.
 
-Key differences from ``det-3detr-utonia-v4m1-0-scannet.py``:
-  - ``pre_encoder.enc_mode = False``  (run Utonia's decoder)
-  - ``encoder.encoder_dim`` / ``model.encoder_dim = UTONIA_DEC_DIM = 54``
-    (PT-v3m3 ScanNet ``dec_channels[0]``, see
-    ``configs/utonia/semseg-utonia-v1m1-0b-scannet-dec.py:26``)
-  - ``pre_encoder.freeze_backbone = "full"`` still — both the encoder
-    and the decoder are frozen. Fine-tuning the decoder is out of scope
-    for this experiment.
+v5m2-0 specifics:
+  - ``pre_encoder.enc_mode = False``  (build and run the decoder path)
+  - ``pre_encoder.freeze_backbone = "enc"``  (embedding + encoder frozen;
+    decoder is trainable)
+  - ``pre_encoder.dec_*`` explicitly set (ckpt carries ``dec_*=None``).
+    Values mirror ``configs/utonia/semseg-utonia-v1m1-0b-scannet-dec.py``;
+    all head dimensions are 18 (= 54/3, 108/6, 216/12, 432/24) so
+    PT-v3m3's 3D-RoPE ``head_dim % 3 == 0`` assertion is satisfied.
+  - no FPS → variable-length output at the shallowest decoder stage
+    (``dec_channels[0] = 54``), padding_mask + LN projection
+
+``_load_pretrained_state`` logs every ``dec.*`` key as "missing — decoder
+will train from random initialization" — that is expected for this
+config; not an error.
 
 Usage:
-    sh scripts/train.sh -d scannet -c det-3detr-utonia-v4m2-0-scannet -n my_exp -g 4
+    sh scripts/train.sh -d scannet -c det-3detr-utonia-v5m2-0-scannet -n my_exp -g 4
 """
 
 _base_ = ["../_base_/default_runtime.py"]
 
 # ── Training ─────────────────────────────────────────────────────────────────
-batch_size = 8       # total across all GPUs
+batch_size = 8
 num_worker = 32
-mix_prob = 0         # detection dataset does not support MixUp
+mix_prob = 0
 enable_amp = False
 find_unused_parameters = False
 clip_grad = 0.1
 
-# Utonia's shallowest decoder stage output width (PT-v3m3 dec_channels[0]).
-# Source: configs/utonia/semseg-utonia-v1m1-0b-scannet-dec.py:26.
+# Shallowest decoder stage width — matches dec_channels[0] below. Head
+# dim = 54/3 = 18 satisfies PT-v3m3's RoPE divisibility assertion.
 UTONIA_DEC_DIM = 54
 
 # ── Model ─────────────────────────────────────────────────────────────────────
@@ -43,8 +48,13 @@ model = dict(
         pretrained="utonia",
         grid_size=0.01,
         enc_mode=False,
-        npoint=2048,
-        freeze_backbone="full",
+        freeze_backbone="enc",
+        # Required: Utonia ckpt has dec_*=None, so we must specify. These
+        # match the semseg-utonia-v1m1-0b-scannet-dec.py reference.
+        dec_depths=(2, 2, 2, 2),
+        dec_channels=(54, 108, 216, 432),
+        dec_num_head=(3, 6, 12, 24),
+        dec_patch_size=(1024, 1024, 1024, 1024),
     ),
     encoder=dict(
         type="VanillaTransformerEncoder3DETR",
