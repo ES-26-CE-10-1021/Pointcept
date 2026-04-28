@@ -1,4 +1,4 @@
-from .dataset_config import ScanNetDetectionConfig
+from .dataset_config import ScanNetDetectionConfig, AgcoBBoxConfig
 from .components import (
     IdentityEncoder3DETR,
     PointnetSAPreEncoder,

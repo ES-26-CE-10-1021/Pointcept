@@ -1,7 +1,21 @@
 # 3DETR Config Overview
 
-All configs live in `configs/scannet/det-3detr-*.py` and train 3DETR for 18-class
-axis-aligned object detection on ScanNet.
+ScanNet 3DETR configs live in `configs/scannet/det-3detr-*.py` (18-class,
+axis-aligned boxes). AGCO configs mirror the same naming under
+`configs/agco/det-3detr-*.py` but use the `AgcoBBoxV1` dataset +
+`AgcoBBoxConfig` (4 classes — hopper, tractor, harvester, trailer — with
+oriented boxes encoded via `num_angle_bin=12`, SUN-RGBD-style).
+
+| AGCO config | Pre-Encoder | Encoder | Notes |
+|-------------|-------------|---------|-------|
+| **v0m1-0**  | PointNet++ SA (2048 pts) | VanillaTransformer (3L) | Baseline on AGCO. num_queries=128, num_angle_bin=12 |
+
+**AgcoBBoxV1 dataset kwargs** (set in `configs/agco/det-3detr-v0m1-0-agco.py`):
+`min_inliers=67` filters parent bboxes; their `children` are kept iff the parent passes.
+`apply_r_level_to_points=True` and `apply_r_level_to_boxes=True` apply `R_level` from
+`gravity_align.npz` to the cloud and to box centers/quats respectively (defaults are
+`False` to match the visualizer's flag defaults). `T_rtk` is intentionally not applied
+in the dataset — sensor-frame clouds + RTK-frame boxes is handled by external tooling.
 
 ## Config summary
 

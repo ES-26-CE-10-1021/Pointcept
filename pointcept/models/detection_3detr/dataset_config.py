@@ -116,3 +116,74 @@ class ScanNetDetectionConfig:
         new_dy = 2.0 * np.max(new_y, 1)
         new_lengths = np.stack((new_dx, new_dy, lengths[:, 2]), axis=1)
         return np.concatenate([new_centers, new_lengths], axis=1)
+
+
+@MODULES.register_module()
+class AgcoBBoxConfig:
+    """Dataset configuration for AGCO 3D object detection (oriented boxes).
+
+    Mirrors third_party/3detr/datasets/sunrgbd.py:SunrgbdDatasetConfig — yaw
+    encoded via (angle_class, residual) with `num_angle_bin` bins.
+
+    Classes (label indices on disk = class indices used here):
+        0: hopper, 1: tractor, 2: harvester, 3: trailer
+    """
+
+    def __init__(self, num_angle_bin: int = 12):
+        self.num_semcls = 4
+        self.num_angle_bin = int(num_angle_bin)
+        self.max_num_obj = 64
+
+        self.type2class = {
+            "hopper": 0,
+            "tractor": 1,
+            "harvester": 2,
+            "trailer": 3,
+        }
+        self.class2type = {v: k for k, v in self.type2class.items()}
+
+    # -- angle encoding (SUN-RGBD-style) --------------------------------------
+
+    def angle2class(self, angle):
+        """Continuous angle (rad) → (class_id, residual_angle).
+        class_id * (2π/N) + residual_angle == angle (mod 2π).
+        """
+        num_class = self.num_angle_bin
+        angle = angle % (2 * np.pi)
+        angle_per_class = 2 * np.pi / float(num_class)
+        shifted_angle = (angle + angle_per_class / 2) % (2 * np.pi)
+        class_id = int(shifted_angle / angle_per_class)
+        residual_angle = shifted_angle - (
+            class_id * angle_per_class + angle_per_class / 2
+        )
+        return class_id, residual_angle
+
+    def class2angle(self, pred_cls, residual, to_label_format=True):
+        num_class = self.num_angle_bin
+        angle_per_class = 2 * np.pi / float(num_class)
+        angle = pred_cls * angle_per_class + residual
+        if to_label_format and angle > np.pi:
+            angle = angle - 2 * np.pi
+        return angle
+
+    def class2anglebatch(self, pred_cls, residual, to_label_format=True):
+        num_class = self.num_angle_bin
+        angle_per_class = 2 * np.pi / float(num_class)
+        angle = pred_cls * angle_per_class + residual
+        if to_label_format:
+            mask = angle > np.pi
+            angle[mask] = angle[mask] - 2 * np.pi
+        return angle
+
+    def class2anglebatch_tensor(self, pred_cls, residual, to_label_format=True):
+        return self.class2anglebatch(pred_cls, residual, to_label_format)
+
+    # -- box corners ----------------------------------------------------------
+
+    def box_parametrization_to_corners(self, box_center_unnorm, box_size, box_angle):
+        box_center_upright = flip_axis_to_camera_tensor(box_center_unnorm)
+        return get_3d_box_batch_tensor(box_size, box_angle, box_center_upright)
+
+    def box_parametrization_to_corners_np(self, box_center_unnorm, box_size, box_angle):
+        box_center_upright = flip_axis_to_camera_np(box_center_unnorm)
+        return get_3d_box_batch_np(box_size, box_angle, box_center_upright)

@@ -39,6 +39,7 @@ from .partnete import PartNetEDataset
 
 # 3D object detection
 from .scannet_detection import ScanNetDetectionDataset
+from .agco_bbox import AgcoBBoxV1
 
 # dataloader
 from .dataloader import MultiDatasetDataloader
