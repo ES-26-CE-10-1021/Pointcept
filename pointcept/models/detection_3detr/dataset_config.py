@@ -126,7 +126,7 @@ class AgcoBBoxConfig:
     encoded via (angle_class, residual) with `num_angle_bin` bins.
 
     Classes (label indices on disk = class indices used here):
-        0: hopper, 1: tractor, 2: harvester, 3: trailer
+        0: background, 1: tractor, 2: harvester, 3: trailer, 4: car, 5: hopper
     """
 
     def __init__(self, num_angle_bin: int = 12):
@@ -139,7 +139,18 @@ class AgcoBBoxConfig:
             "tractor": 1,
             "harvester": 2,
             "trailer": 3,
+            "car": 4,
         }
+        # self.type2class = {
+        #     "background": 0,
+        #     "tractor": 1,
+        #     "harvester": 2,
+        #     "trailer": 3,
+        #     "car": 4,
+        #     "hopper": 5,
+        #     #"building": 6,
+        #     #"tree": 7,
+        # }
         self.class2type = {v: k for k, v in self.type2class.items()}
 
     # -- angle encoding (SUN-RGBD-style) --------------------------------------

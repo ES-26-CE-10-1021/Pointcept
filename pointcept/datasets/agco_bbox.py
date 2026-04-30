@@ -199,7 +199,7 @@ class AgcoBBoxV1(Dataset):
         split="train",
         split_prefix="agco",
         sensors=("lslidar",),
-        num_points=40000,
+        num_points=80000,
         use_intensity=False,
         transform=None,
         require_gravity_align=True,
