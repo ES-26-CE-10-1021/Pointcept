@@ -24,10 +24,13 @@ On-disk layout (per annotation root):
 Per-timestamp bboxes JSON:
 
     {"annotations": [
-        {"position": [x, y, z],
-         "rotationQuaternion": [qx, qy, qz, qw],  # scipy xyzw order
-         "scaling": [dx, dy, dz],                 # full box size in meters
-         "label": <int 0..num_semcls-1>},
+        {"translation": [x, y, z],
+         "rotation": [qx, qy, qz, qw],  # scipy xyzw order
+         "dimensions": [dx, dy, dz],    # full box size in metres
+         "label": <int 0..num_semcls-1>,
+         "inliers": <int>,
+         "is_visible": <bool>,
+         "children": [...]},             # optional child annotations
         ...
     ]}
 

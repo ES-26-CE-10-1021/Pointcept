@@ -3,12 +3,12 @@
 Interactive Open3D visualization of AgcoBBoxV1 dataset.
 
 Loads samples directly from the AgcoBBoxV1 dataset class to test its output
-schema and transformations. 
+schema and transformations.
 
 Controls:
-    [Space] : Load next sample
-    [B]     : Load previous sample
-    [P]     : Toggle Play/Pause video mode
+    [→]     : Load next sample
+    [←]     : Load previous sample
+    [P/Space] : Toggle Play/Pause video mode
     [1-9]   : Scrub dataset (1=Start, 5=Middle, 9=End)
     [Q]     : Quit
 """
@@ -22,6 +22,13 @@ import open3d as o3d
 from scipy.spatial.transform import Rotation as Rot
 
 from pointcept.datasets.agco_bbox import AgcoBBoxV1
+
+_DEFAULT_VIEW = {
+    "front":  [-0.8774444612089376, 0.057891256148444932, 0.47617204869176499],
+    "lookat": [46.248564381546856, -4.1298021356340309, -11.353385072551928],
+    "up":     [0.47679769375413167, -0.003366388927639026, 0.87900661354527321],
+    "zoom":   0.42,
+}
 
 
 def quaternion_to_rotation_matrix(quat):
@@ -127,9 +134,10 @@ class DatasetViewer:
         self.vis = o3d.visualization.VisualizerWithKeyCallback()
         self.vis.create_window(width=1280, height=960, window_name="AgcoBBoxV1 Interactive Viewer")
 
-        # Register callbacks: 32 = Space, 66 = 'B', 80 = 'P', 81 = 'Q'
-        self.vis.register_key_callback(32, self.next_sample)
-        self.vis.register_key_callback(66, self.prev_sample)
+        # Register callbacks: 262 = →, 263 = ←, 32 = Space, 80 = 'P', 81 = 'Q'
+        self.vis.register_key_callback(262, self.next_sample)
+        self.vis.register_key_callback(263, self.prev_sample)
+        self.vis.register_key_callback(32, self.toggle_play)
         self.vis.register_key_callback(80, self.toggle_play)
         self.vis.register_key_callback(81, self.quit)
         
@@ -158,9 +166,9 @@ class DatasetViewer:
         self.is_first_frame = True
 
         print("\n--- Viewer Controls ---")
-        print("[Space] : Next frame")
-        print("[B]     : Previous frame")
-        print("[P]     : Toggle Play/Pause")
+        print("[→]     : Next frame")
+        print("[←]     : Previous frame")
+        print("[P/Space]: Toggle Play/Pause")
         print("[1-9]   : Scrub dataset (1=Start, 5=Middle, 9=End)")
         print("[Q]     : Quit")
         print("-----------------------\n")
@@ -190,6 +198,13 @@ class DatasetViewer:
                 self.vis.add_geometry(geom, reset_bounding_box=self.is_first_frame)
                 self.active_geometries.append(geom)
 
+            if self.is_first_frame:
+                vc = self.vis.get_view_control()
+                vc.set_front(_DEFAULT_VIEW["front"])
+                vc.set_lookat(_DEFAULT_VIEW["lookat"])
+                vc.set_up(_DEFAULT_VIEW["up"])
+                vc.set_zoom(_DEFAULT_VIEW["zoom"])
+
             self.is_first_frame = False
 
         except Exception as e:
@@ -216,12 +231,12 @@ class DatasetViewer:
         return False
     
     def manual_next(self, vis=None):
-        """Triggered only by the Spacebar."""
+        """Triggered only by the right arrow key."""
         self.playing = False
         return self.next_sample()
 
     def manual_prev(self, vis=None):
-        """Triggered only by the 'B' key."""
+        """Triggered only by the left arrow key."""
         self.playing = False
         return self.prev_sample()
 
@@ -273,11 +288,12 @@ def main():
     parser.add_argument("--start-idx", type=int, default=0)
     parser.add_argument("--use-intensity", action="store_true")
     parser.add_argument("--augment", action="store_true")
-    parser.add_argument("--require-gravity", action="store_true", default=True)
-    parser.add_argument("--apply-r-level-to-points", action="store_true", default=False)
     parser.add_argument("--num-points", type=int, default=40000)
     parser.add_argument("--apply-t-rtk", action="store_true")
     parser.add_argument("--sensor", default="lslidar")
+    parser.add_argument("--min-inliers", type=int, default=200)
+    parser.add_argument("--apply-gravity-boxes", action="store_true")
+    parser.add_argument("--apply-gravity-pts", action="store_true")
 
     args = parser.parse_args()
 
@@ -291,8 +307,14 @@ def main():
             num_points=args.num_points,
             use_intensity=args.use_intensity,
             augment=args.augment,
-            require_gravity_align=args.require_gravity,
+            min_inliers=args.min_inliers,
             apply_t_rtk=args.apply_t_rtk,
+            require_calibration=args.apply_t_rtk,
+            apply_r_level_to_boxes=args.apply_gravity_boxes,
+            apply_r_level_to_points=args.apply_gravity_pts,
+            require_gravity_align=args.apply_gravity_boxes or args.apply_gravity_pts,
+            loop=1,
+            residual_rpy_warn_deg=5,
         )
     except Exception as e:
         print(f"Error: Failed to initialize dataset: {e}", file=sys.stderr)
