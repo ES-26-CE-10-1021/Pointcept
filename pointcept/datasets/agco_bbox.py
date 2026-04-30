@@ -27,7 +27,7 @@ Per-timestamp bboxes JSON:
         {"translation": [x, y, z],
          "rotation": [qx, qy, qz, qw],  # scipy xyzw order
          "dimensions": [dx, dy, dz],    # full box size in metres
-         "label": <int 0..num_semcls-1>,
+         "label": <int; disk scheme: 0=bg, 1=tractor, 2=harvester, 3=trailer, 4=car, 5=hopper>,
          "inliers": <int>,
          "is_visible": <bool>,
          "children": [...]},             # optional child annotations
@@ -52,6 +52,13 @@ from .scannet_detection import (
     MEAN_COLOR_RGB,  # noqa: F401 - kept for parity; may be used later
     _random_sampling,
 )
+
+# Mapping from disk label (upstream annotation tool) to model class index.
+# Background (disk label 0) is excluded; entries not in this dict are dropped.
+# Disk scheme: 0=background, 1=tractor, 2=harvester, 3=trailer, 4=car, 5=hopper
+# Model scheme: 0=hopper, 1=tractor, 2=harvester, 3=trailer, 4=car
+_DISK_LABEL_TO_CLASS = {0: 4, 1: 0, 2: 1, 3: 2, 4: 3} # <-- First dataset mapping
+# _DISK_LABEL_TO_CLASS = {1: 0, 2: 1, 3: 2, 4: 3, 5: 4} # <-- Proper dataset mapping
 
 
 def _load_r_level(path, require: bool):
@@ -339,6 +346,9 @@ class AgcoBBoxV1(Dataset):
                 filtered.append(b)
                 filtered.extend(b.get("children", []))
 
+        # Remap disk labels to model class indices; drop background (disk 0) and any unrecognised labels.
+        filtered = [b for b in filtered if int(b.get("label", -1)) in _DISK_LABEL_TO_CLASS]
+
         n = len(filtered)
         centers = np.zeros((n, 3), dtype=np.float64)
         sizes = np.zeros((n, 3), dtype=np.float32)
@@ -347,8 +357,8 @@ class AgcoBBoxV1(Dataset):
         for i, b in enumerate(filtered):
             centers[i] = b.get("translation")
             sizes[i] = b.get("dimensions")
-            quats[i] = b.get("rotation") # xyzw
-            labels[i] = int(b["label"])
+            quats[i] = b.get("rotation")
+            labels[i] = _DISK_LABEL_TO_CLASS[int(b["label"])]
         return centers, sizes, quats, labels
 
     def __getitem__(self, idx):

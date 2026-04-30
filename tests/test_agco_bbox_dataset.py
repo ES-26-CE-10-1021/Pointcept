@@ -518,3 +518,63 @@ def test_agco_dataset_no_transform_still_subsamples():
         )
         sample = ds[0]
         assert sample["point_clouds"].shape[0] == 400
+
+
+def test_agco_disk_label_remapping_and_background_filter():
+    """Disk label 5 (hopper) must remap to model class 0; disk label 0
+    (background) must be silently dropped from gt_box_present."""
+    from pointcept.datasets.agco_bbox import AgcoBBoxV1
+
+    boxes = {
+        "scene0": [
+            # background: disk label 0 — must be filtered out
+            dict(
+                translation=[0.0, 0.0, 0.0],
+                rotation=[0.0, 0.0, 0.0, 1.0],
+                dimensions=[1.0, 1.0, 1.0],
+                label=0,
+                inliers=100,
+                is_visible=True,
+            ),
+            # hopper: disk label 5 — must remap to model class 0
+            dict(
+                translation=[1.0, 0.0, 0.0],
+                rotation=[0.0, 0.0, 0.0, 1.0],
+                dimensions=[1.0, 1.0, 1.0],
+                label=5,
+                inliers=100,
+                is_visible=True,
+            ),
+            # tractor: disk label 1 — must stay as model class 1
+            dict(
+                translation=[2.0, 0.0, 0.0],
+                rotation=[0.0, 0.0, 0.0, 1.0],
+                dimensions=[2.0, 3.0, 2.0],
+                label=1,
+                inliers=100,
+                is_visible=True,
+            ),
+        ]
+    }
+
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_root, meta_dir = _make_tmp_dataset_tree(tmp, boxes_by_root=boxes)
+        ds = AgcoBBoxV1(
+            root_dir=tmp_root,
+            meta_data_dir=meta_dir,
+            split="train",
+            sensors=["lslidar"],
+            num_points=500,
+        )
+        sample = ds[0]
+
+        # background (disk 0) is dropped → only 2 gt objects remain
+        present = sample["gt_box_present"]
+        assert present[:2].sum() == 2.0, f"expected 2 present boxes, got {present.sum()}"
+        assert present[2] == 0.0
+
+        labels = sample["gt_box_sem_cls_label"]
+        # First surviving box is hopper (disk 5 → model 0)
+        assert labels[0] == 0, f"hopper should be model class 0, got {labels[0]}"
+        # Second surviving box is tractor (disk 1 → model 1)
+        assert labels[1] == 1, f"tractor should be model class 1, got {labels[1]}"

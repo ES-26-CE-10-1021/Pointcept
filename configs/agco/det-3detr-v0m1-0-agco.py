@@ -25,7 +25,7 @@ enable_amp = False
 find_unused_parameters = False
 clip_grad = 0.1
 
-num_semcls = 4
+num_semcls = 5
 num_angle_bin = 12
 
 # ── Model ─────────────────────────────────────────────────────────────────────
@@ -106,8 +106,7 @@ meta_data_dir = "/mnt/data/pointcloud_datasets/Pointcept/agco2026/meta_data"
 sensors = ["lslidar"]
 num_points = 100_000
 
-# class_names = ["background", "tractor", "harvester", "trailer", "car", "hopper",]
-class_names = ["hopper", "tractor", "harvester", "trailer", "car"]
+class_names = ["tractor", "harvester", "trailer", "car", "hopper",]
 min_inliers = 500
 
 

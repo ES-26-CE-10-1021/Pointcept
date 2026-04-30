@@ -125,33 +125,35 @@ class AgcoBBoxConfig:
     Mirrors third_party/3detr/datasets/sunrgbd.py:SunrgbdDatasetConfig — yaw
     encoded via (angle_class, residual) with `num_angle_bin` bins.
 
-    Classes (label indices on disk = class indices used here):
-        0: background, 1: tractor, 2: harvester, 3: trailer, 4: car, 5: hopper
+    Disk label scheme (upstream annotation tool):
+        0: background (excluded from training targets)
+        1: tractor
+        2: harvester
+        3: trailer
+        4: car
+        5: hopper
+
+    Model class indices (after remapping by AgcoBBoxV1._load_boxes):
+        0: tractor
+        1: harvester
+        2: trailer
+        3: car
+        4: hopper
     """
 
     def __init__(self, num_angle_bin: int = 12):
-        self.num_semcls = 4
         self.num_angle_bin = int(num_angle_bin)
         self.max_num_obj = 64
 
         self.type2class = {
-            "hopper": 0,
-            "tractor": 1,
-            "harvester": 2,
-            "trailer": 3,
-            "car": 4,
+            "tractor": 0,
+            "harvester": 1,
+            "trailer": 2,
+            "car": 3,
+            "hopper": 4,
         }
-        # self.type2class = {
-        #     "background": 0,
-        #     "tractor": 1,
-        #     "harvester": 2,
-        #     "trailer": 3,
-        #     "car": 4,
-        #     "hopper": 5,
-        #     #"building": 6,
-        #     #"tree": 7,
-        # }
         self.class2type = {v: k for k, v in self.type2class.items()}
+        self.num_semcls = len(self.type2class.keys())
 
     # -- angle encoding (SUN-RGBD-style) --------------------------------------
 
