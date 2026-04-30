@@ -114,7 +114,6 @@ def test_agco_dataset_schema_and_shapes():
             split="train",
             sensors=["lslidar"],
             num_points=500,
-            augment=False,
         )
         assert len(ds) == 1
         sample = ds[0]
@@ -182,7 +181,6 @@ def test_agco_dataset_gravity_roundtrip():
             split="train",
             sensors=["lslidar"],
             num_points=500,
-            augment=False,
             apply_r_level_to_points=True,
             apply_r_level_to_boxes=True,
         )
@@ -349,3 +347,174 @@ def test_agco_dataset_multi_sensor_enumeration():
         for ridx, sensor, ts in ds.samples:
             sensor_counts[sensor] += 1
         assert sensor_counts == {"lslidar": 3, "ouster": 3}
+
+
+# ---------------------------------------------------------------------------
+# Detection-aware transforms
+# ---------------------------------------------------------------------------
+
+
+def _wrap_pi(x):
+    return (x + np.pi) % (2 * np.pi) - np.pi
+
+
+def _make_box_dict(centers, sizes, yaws, labels, num_points=200):
+    rng = np.random.RandomState(0)
+    return {
+        "point_cloud": rng.randn(num_points, 3).astype(np.float32) * 3.0,
+        "gt_box_centers_raw": np.asarray(centers, dtype=np.float32),
+        "gt_box_sizes_raw": np.asarray(sizes, dtype=np.float32),
+        "gt_box_angles_raw": np.asarray(yaws, dtype=np.float32),
+        "gt_box_labels_raw": np.asarray(labels, dtype=np.int64),
+    }
+
+
+def test_random_flip_detection_x_only():
+    from pointcept.datasets.det_transform import RandomFlipDetection
+
+    d = _make_box_dict([[1.0, 2.0, 0.0]], [[1, 1, 1]], [0.3], [1])
+    pc_before = d["point_cloud"].copy()
+    out = RandomFlipDetection(p_x=1.0, p_y=0.0)(d)
+    np.testing.assert_allclose(out["point_cloud"][:, 0], -pc_before[:, 0])
+    np.testing.assert_allclose(out["point_cloud"][:, 1], pc_before[:, 1])
+    np.testing.assert_allclose(out["gt_box_centers_raw"][0], [-1.0, 2.0, 0.0])
+    assert abs(_wrap_pi(out["gt_box_angles_raw"][0] - (-0.3))) < 1e-6
+
+
+def test_random_flip_detection_y_only():
+    from pointcept.datasets.det_transform import RandomFlipDetection
+
+    d = _make_box_dict([[1.0, 2.0, 0.0]], [[1, 1, 1]], [0.3], [1])
+    out = RandomFlipDetection(p_x=0.0, p_y=1.0)(d)
+    np.testing.assert_allclose(out["gt_box_centers_raw"][0], [1.0, -2.0, 0.0])
+    expected = _wrap_pi(np.pi - 0.3)
+    assert abs(_wrap_pi(out["gt_box_angles_raw"][0] - expected)) < 1e-6
+
+
+def test_random_rotate_z_detection_yaw_addition():
+    from pointcept.datasets.det_transform import RandomRotateZDetection
+
+    np.random.seed(123)
+    yaw_in = 0.4
+    d = _make_box_dict([[2.0, 0.0, 0.0]], [[1, 1, 1]], [yaw_in], [0])
+    # Sample θ ourselves, then re-seed and apply transform: same draw.
+    np.random.seed(123)
+    theta = np.random.uniform(np.deg2rad(-5.0), np.deg2rad(5.0))
+    np.random.seed(123)
+    out = RandomRotateZDetection(angle_deg=(-5.0, 5.0))(d)
+    expected_yaw = _wrap_pi(yaw_in + theta)
+    assert abs(_wrap_pi(out["gt_box_angles_raw"][0] - expected_yaw)) < 1e-6
+    # Center magnitude preserved (pure rotation).
+    np.testing.assert_allclose(
+        np.linalg.norm(out["gt_box_centers_raw"][0]), 2.0, atol=1e-5
+    )
+
+
+def test_random_scale_detection_sizes_optional():
+    from pointcept.datasets.det_transform import RandomScaleDetection
+
+    d_keep_sizes = _make_box_dict([[1.0, 1.0, 1.0]], [[2.0, 3.0, 4.0]], [0.0], [0])
+    d_scale_sizes = _make_box_dict([[1.0, 1.0, 1.0]], [[2.0, 3.0, 4.0]], [0.0], [0])
+    np.random.seed(7)
+    out_no = RandomScaleDetection(scale=(1.5, 1.5), apply_to_sizes=False)(d_keep_sizes)
+    np.random.seed(7)
+    out_yes = RandomScaleDetection(scale=(1.5, 1.5), apply_to_sizes=True)(d_scale_sizes)
+    np.testing.assert_allclose(out_no["gt_box_sizes_raw"][0], [2.0, 3.0, 4.0])
+    np.testing.assert_allclose(out_no["gt_box_centers_raw"][0], [1.5, 1.5, 1.5])
+    np.testing.assert_allclose(out_yes["gt_box_sizes_raw"][0], [3.0, 4.5, 6.0])
+    np.testing.assert_allclose(out_yes["gt_box_centers_raw"][0], [1.5, 1.5, 1.5])
+
+
+def test_random_cuboid_detection_filters_outside_boxes():
+    from pointcept.datasets.det_transform import RandomCuboidDetection
+
+    rng = np.random.RandomState(0)
+    pc = rng.uniform(-1.0, 1.0, size=(50000, 3)).astype(np.float32)
+    d = {
+        "point_cloud": pc,
+        # Inside cube, near origin.
+        "gt_box_centers_raw": np.array([[0.0, 0.0, 0.0], [10.0, 10.0, 10.0]],
+                                       dtype=np.float32),
+        "gt_box_sizes_raw": np.ones((2, 3), dtype=np.float32),
+        "gt_box_angles_raw": np.zeros((2,), dtype=np.float32),
+        "gt_box_labels_raw": np.array([0, 1], dtype=np.int64),
+    }
+    np.random.seed(0)
+    out = RandomCuboidDetection(min_points=1000, min_crop=0.5, max_crop=0.5)(d)
+    # The far box is outside the [-1,1]^3 point cloud; must be filtered.
+    assert out["gt_box_centers_raw"].shape[0] == 1
+    assert out["gt_box_labels_raw"][0] == 0
+
+
+def test_point_subsample_detection_exact_count():
+    from pointcept.datasets.det_transform import PointSubsampleDetection
+
+    d = _make_box_dict([[0, 0, 0]], [[1, 1, 1]], [0.0], [0], num_points=1000)
+    out = PointSubsampleDetection(num_points=400)(d)
+    assert out["point_cloud"].shape == (400, 3)
+
+
+def test_agco_dataset_uses_transform_pipeline():
+    """Construct two AGCO datasets, one with a guaranteed X-flip, and confirm
+    the transform actually mutates the box centers."""
+    from pointcept.datasets.agco_bbox import AgcoBBoxV1
+
+    boxes = {
+        "scene0": [
+            dict(
+                translation=[2.0, 1.0, 0.0],
+                rotation=[0.0, 0.0, 0.0, 1.0],
+                dimensions=[1.0, 1.0, 1.0],
+                label=1,
+                inliers=100,
+                is_visible=True,
+            )
+        ]
+    }
+
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_root, meta_dir = _make_tmp_dataset_tree(
+            tmp, boxes_by_root=boxes
+        )
+        ds_no = AgcoBBoxV1(
+            root_dir=tmp_root,
+            meta_data_dir=meta_dir,
+            split="train",
+            sensors=["lslidar"],
+            num_points=500,
+        )
+        ds_flip = AgcoBBoxV1(
+            root_dir=tmp_root,
+            meta_data_dir=meta_dir,
+            split="train",
+            sensors=["lslidar"],
+            num_points=500,
+            transform=[dict(type="RandomFlipDetection", p_x=1.0, p_y=0.0)],
+        )
+        np.random.seed(0)
+        s_no = ds_no[0]
+        np.random.seed(0)
+        s_flip = ds_flip[0]
+
+        # Center X must be negated by the flip transform.
+        np.testing.assert_allclose(s_no["gt_box_centers"][0, 0], 2.0, atol=1e-5)
+        np.testing.assert_allclose(s_flip["gt_box_centers"][0, 0], -2.0, atol=1e-5)
+
+
+def test_agco_dataset_no_transform_still_subsamples():
+    """Even without a PointSubsampleDetection transform, the dataset must
+    deliver exactly `num_points` points (safety net)."""
+    from pointcept.datasets.agco_bbox import AgcoBBoxV1
+
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_root, meta_dir = _make_tmp_dataset_tree(tmp, num_points=2000)
+        ds = AgcoBBoxV1(
+            root_dir=tmp_root,
+            meta_data_dir=meta_dir,
+            split="train",
+            sensors=["lslidar"],
+            num_points=400,  # fewer than file's 2000, force subsample
+            transform=None,
+        )
+        sample = ds[0]
+        assert sample["point_clouds"].shape[0] == 400

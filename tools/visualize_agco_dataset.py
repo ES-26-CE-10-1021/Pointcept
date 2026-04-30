@@ -9,6 +9,7 @@ Controls:
     [→]     : Load next sample
     [←]     : Load previous sample
     [P/Space] : Toggle Play/Pause video mode
+    [R]     : Reload current sample (see different augmentations)
     [1-9]   : Scrub dataset (1=Start, 5=Middle, 9=End)
     [Q]     : Quit
 """
@@ -134,11 +135,12 @@ class DatasetViewer:
         self.vis = o3d.visualization.VisualizerWithKeyCallback()
         self.vis.create_window(width=1280, height=960, window_name="AgcoBBoxV1 Interactive Viewer")
 
-        # Register callbacks: 262 = →, 263 = ←, 32 = Space, 80 = 'P', 81 = 'Q'
+        # Register callbacks: 262 = →, 263 = ←, 32 = Space, 80 = 'P', 81 = 'Q', 82 = 'R'
         self.vis.register_key_callback(262, self.next_sample)
         self.vis.register_key_callback(263, self.prev_sample)
         self.vis.register_key_callback(32, self.toggle_play)
         self.vis.register_key_callback(80, self.toggle_play)
+        self.vis.register_key_callback(82, self.reload_sample)
         self.vis.register_key_callback(81, self.quit)
         
         def make_scrub_callback(fraction):
@@ -169,6 +171,7 @@ class DatasetViewer:
         print("[→]     : Next frame")
         print("[←]     : Previous frame")
         print("[P/Space]: Toggle Play/Pause")
+        print("[R]     : Reload current sample (see different augmentations)")
         print("[1-9]   : Scrub dataset (1=Start, 5=Middle, 9=End)")
         print("[Q]     : Quit")
         print("-----------------------\n")
@@ -229,7 +232,13 @@ class DatasetViewer:
         else:
             print("Already at the first sample.")
         return False
-    
+
+    def reload_sample(self, vis=None):
+        """Reload the current sample to see different augmentations."""
+        self.playing = False
+        self.load_sample()
+        return False
+
     def manual_next(self, vis=None):
         """Triggered only by the right arrow key."""
         self.playing = False
@@ -297,6 +306,14 @@ def main():
 
     args = parser.parse_args()
 
+    transform = [dict(type="PointSubsampleDetection", num_points=args.num_points)]
+    if args.augment:
+        transform = [
+            dict(type="RandomFlipDetection", p_x=0.5, p_y=0.5),
+            dict(type="RandomRotateZDetection", angle_deg=(-5.0, 5.0)),
+            dict(type="PointSubsampleDetection", num_points=args.num_points),
+        ]
+
     try:
         dataset = AgcoBBoxV1(
             root_dir=args.root_dir,
@@ -306,7 +323,7 @@ def main():
             sensors=tuple(args.sensors),
             num_points=args.num_points,
             use_intensity=args.use_intensity,
-            augment=args.augment,
+            transform=transform,
             min_inliers=args.min_inliers,
             apply_t_rtk=args.apply_t_rtk,
             require_calibration=args.apply_t_rtk,

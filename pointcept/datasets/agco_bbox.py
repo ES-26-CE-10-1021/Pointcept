@@ -51,7 +51,6 @@ from .builder import DATASETS
 from .scannet_detection import (
     MEAN_COLOR_RGB,  # noqa: F401 - kept for parity; may be used later
     _random_sampling,
-    _rotz,
 )
 
 
@@ -142,11 +141,6 @@ def _shift_scale_points(pts, src_range, dst_range):
     return pts * scale + bias
 
 
-def _wrap_pi(angle):
-    """Wrap angle into (-pi, pi]."""
-    return (angle + np.pi) % (2 * np.pi) - np.pi
-
-
 @DATASETS.register_module()
 class AgcoBBoxV1(Dataset):
     """AGCO oriented-bbox detection dataset for 3DETR.
@@ -160,12 +154,19 @@ class AgcoBBoxV1(Dataset):
         sensors (list[str]): LiDAR folders to enumerate samples from, e.g.
             ["lslidar"] or ["lslidar", "ouster"]. Each sensor contributes its
             own samples; clouds are NOT fused across sensors.
-        num_points (int): points subsampled per scan.
+        num_points (int): points subsampled per scan. Enforced as a final
+            safety-net even if the ``transform`` pipeline doesn't include
+            ``PointSubsampleDetection``.
         use_intensity (bool): if True, append per-point intensity as a 4th
             channel when intensity .npy is present; otherwise zeros.
-        augment (bool): apply random flips, small Z-rotation, and random
-            cuboid crop (from third_party/3detr).
-        random_cuboid_min_points (int): min points retained by cuboid crop.
+        transform (list[dict] | None): Pointcept-style augmentation pipeline.
+            Each entry is a config dict for a transform registered in the
+            ``TRANSFORMS`` registry; the detection-aware transforms in
+            ``pointcept/datasets/det_transform.py`` (``RandomFlipDetection``,
+            ``RandomRotateZDetection``, ``RandomScaleDetection``,
+            ``RandomJitterDetection``, ``RandomCuboidDetection``,
+            ``PointSubsampleDetection``) are the supported set. ``None`` /
+            ``[]`` disables augmentation; a final-size subsample still runs.
         require_gravity_align (bool): if True (default), missing
             `gravity_align.npz` raises; if False, falls back to identity with
             a warning.
@@ -200,8 +201,7 @@ class AgcoBBoxV1(Dataset):
         sensors=("lslidar",),
         num_points=40000,
         use_intensity=False,
-        augment=False,
-        random_cuboid_min_points=30000,
+        transform=None,
         require_gravity_align=True,
         residual_rpy_warn_deg=2.0,
         loop=1,
@@ -221,8 +221,8 @@ class AgcoBBoxV1(Dataset):
         self.sensors = tuple(sensors)
         self.num_points = int(num_points)
         self.use_intensity = bool(use_intensity)
-        self.augment = bool(augment)
-        self.random_cuboid_min_points = int(random_cuboid_min_points)
+        from .transform import Compose
+        self.transform = Compose(transform or [])
         self.require_gravity_align = bool(require_gravity_align)
         self.residual_rpy_warn_rad = np.deg2rad(float(residual_rpy_warn_deg))
         self.loop = int(loop)
@@ -357,10 +357,9 @@ class AgcoBBoxV1(Dataset):
         R = self.r_levels[ridx]
 
         point_cloud = self._load_scan(abs_root, sensor, ts)
-        centers_raw, sizes, quats_xyzw, labels = self._load_boxes(
+        centers_raw, sizes_raw, quats_xyzw, labels_raw = self._load_boxes(
             abs_root, sensor, ts
         )
-        num_gt = min(centers_raw.shape[0], self.max_num_obj)
 
         # --- Sensor → RTK frame (T_rtk), then RTK → levelled frame (R_level) ---
         if self.apply_t_rtk:
@@ -374,15 +373,16 @@ class AgcoBBoxV1(Dataset):
         if self.apply_r_level_to_points:
             point_cloud[:, 0:3] = R.apply(point_cloud[:, 0:3]).astype(np.float32)
 
-        if num_gt > 0:
+        n_boxes = centers_raw.shape[0]
+        if n_boxes > 0:
             if self.apply_r_level_to_boxes:
-                centers = R.apply(centers_raw[:num_gt]).astype(np.float32)
-                q_level = (R * Rot.from_quat(quats_xyzw[:num_gt])).as_quat()
+                centers_raw = R.apply(centers_raw).astype(np.float32)
+                q_level = (R * Rot.from_quat(quats_xyzw)).as_quat()
             else:
-                centers = centers_raw[:num_gt].astype(np.float32)
-                q_level = quats_xyzw[:num_gt]
+                centers_raw = centers_raw.astype(np.float32)
+                q_level = quats_xyzw
             rpy = Rot.from_quat(q_level).as_euler("xyz")
-            yaws = rpy[:, 2].astype(np.float32)
+            yaws_raw = rpy[:, 2].astype(np.float32)
             if (
                 self.apply_r_level_to_boxes
                 and np.max(np.abs(rpy[:, :2])) > self.residual_rpy_warn_rad
@@ -394,37 +394,33 @@ class AgcoBBoxV1(Dataset):
                     stacklevel=2,
                 )
         else:
-            centers = np.zeros((0, 3), dtype=np.float32)
-            yaws = np.zeros((0,), dtype=np.float32)
+            centers_raw = np.zeros((0, 3), dtype=np.float32)
+            yaws_raw = np.zeros((0,), dtype=np.float32)
+        sizes_raw = sizes_raw.astype(np.float32)
 
-        sizes = sizes[:num_gt].astype(np.float32)
-        labels = labels[:num_gt]
+        # --- Augmentation pipeline (config-driven) ---
+        data_dict = {
+            "point_cloud": point_cloud,
+            "gt_box_centers_raw": centers_raw,
+            "gt_box_sizes_raw": sizes_raw,
+            "gt_box_angles_raw": yaws_raw,
+            "gt_box_labels_raw": labels_raw,
+        }
+        data_dict = self.transform(data_dict)
+        point_cloud = data_dict["point_cloud"]
+        centers_raw = data_dict["gt_box_centers_raw"]
+        sizes_raw = data_dict["gt_box_sizes_raw"]
+        yaws_raw = data_dict["gt_box_angles_raw"]
+        labels_raw = data_dict["gt_box_labels_raw"]
 
-        # --- Augmentation ---
-        if self.augment:
-            if np.random.random() > 0.5:
-                point_cloud[:, 0] *= -1
-                if num_gt > 0:
-                    centers[:, 0] *= -1
-                    yaws = _wrap_pi(-yaws)
-            if np.random.random() > 0.5:
-                point_cloud[:, 1] *= -1
-                if num_gt > 0:
-                    centers[:, 1] *= -1
-                    yaws = _wrap_pi(np.pi - yaws)
-            rot_angle = (np.random.random() * np.pi / 18) - np.pi / 36
-            rot_mat = _rotz(rot_angle).astype(np.float32)
-            point_cloud[:, 0:3] = point_cloud[:, 0:3] @ rot_mat.T
-            if num_gt > 0:
-                centers = centers @ rot_mat.T
-                yaws = _wrap_pi(yaws + rot_angle).astype(np.float32)
-
-        # --- Subsample to num_points ---
-        point_cloud, _ = _random_sampling(point_cloud, self.num_points)
+        # --- Safety-net subsample (idempotent if pipeline already did it) ---
+        if point_cloud.shape[0] != self.num_points:
+            point_cloud, _ = _random_sampling(point_cloud, self.num_points)
         point_cloud = point_cloud.astype(np.float32)
 
-        # --- Pad to MAX_NUM_OBJ ---
+        # --- Pad to MAX_NUM_OBJ (cap to MAX after augmentation) ---
         M = self.max_num_obj
+        num_gt = min(centers_raw.shape[0], M)
         gt_centers = np.zeros((M, 3), dtype=np.float32)
         gt_sizes = np.zeros((M, 3), dtype=np.float32)
         gt_angles = np.zeros((M,), dtype=np.float32)
@@ -432,10 +428,10 @@ class AgcoBBoxV1(Dataset):
         gt_present = np.zeros((M,), dtype=np.float32)
         gt_angle_cls = np.zeros((M,), dtype=np.int64)
         gt_angle_res = np.zeros((M,), dtype=np.float32)
-        gt_centers[:num_gt] = centers
-        gt_sizes[:num_gt] = sizes
-        gt_angles[:num_gt] = yaws
-        gt_sem_cls[:num_gt] = labels
+        gt_centers[:num_gt] = centers_raw[:num_gt]
+        gt_sizes[:num_gt] = sizes_raw[:num_gt]
+        gt_angles[:num_gt] = yaws_raw[:num_gt]
+        gt_sem_cls[:num_gt] = labels_raw[:num_gt]
         gt_present[:num_gt] = 1.0
 
         # Angle-bin encoding (SUN-RGBD-style, via AgcoBBoxConfig).
@@ -443,7 +439,7 @@ class AgcoBBoxV1(Dataset):
 
         cfg = AgcoBBoxConfig()  # cheap; no state
         for i in range(num_gt):
-            cls_id, res = cfg.angle2class(float(yaws[i]))
+            cls_id, res = cfg.angle2class(float(yaws_raw[i]))
             gt_angle_cls[i] = cls_id
             gt_angle_res[i] = res
 

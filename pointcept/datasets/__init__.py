@@ -39,6 +39,7 @@ from .partnete import PartNetEDataset
 
 # 3D object detection
 from .scannet_detection import ScanNetDetectionDataset
+from . import det_transform  # noqa: F401  (registers detection-aware transforms)
 from .agco_bbox import AgcoBBoxV1
 
 # dataloader

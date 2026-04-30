@@ -14,8 +14,23 @@ oriented boxes encoded via `num_angle_bin=12`, SUN-RGBD-style).
 `min_inliers=67` filters parent bboxes; their `children` are kept iff the parent passes.
 `apply_r_level_to_points=True` and `apply_r_level_to_boxes=True` apply `R_level` from
 `gravity_align.npz` to the cloud and to box centers/quats respectively (defaults are
-`False` to match the visualizer's flag defaults). `T_rtk` is intentionally not applied
-in the dataset — sensor-frame clouds + RTK-frame boxes is handled by external tooling.
+`False` to match the visualizer's flag defaults). `apply_t_rtk=True` (with
+`require_calibration` controlling strictness) applies the per-sensor T_rtk from each
+root's `calibration.yml` before R_level.
+
+**Augmentation** is config-driven via a `transform=[...]` list (Pointcept-style).
+Detection-aware transforms registered in `pointcept/datasets/det_transform.py`:
+
+| Transform                  | Knobs                                                             |
+|----------------------------|-------------------------------------------------------------------|
+| `RandomFlipDetection`      | `p_x`, `p_y` — independent X/Y mirror; updates centers + yaws.     |
+| `RandomRotateZDetection`   | `angle_deg=(lo, hi)` in degrees; rotates points + centers + yaws.  |
+| `RandomScaleDetection`     | `scale=(lo, hi)`, `apply_to_sizes=True`.                           |
+| `RandomJitterDetection`    | `sigma`, `clip` — Gaussian jitter on point XYZ only.               |
+| `RandomCuboidDetection`    | `min_points`, `aspect`, `min_crop`, `max_crop`; filters boxes.     |
+| `PointSubsampleDetection`  | `num_points` — fixed-size subsample; dataset enforces as fallback. |
+
+Legacy `augment` and `random_cuboid_min_points` kwargs were removed.
 
 ## Config summary
 
