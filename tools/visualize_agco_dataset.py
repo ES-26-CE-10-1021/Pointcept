@@ -37,6 +37,25 @@ def quaternion_to_rotation_matrix(quat):
     return Rot.from_quat(quat).as_matrix()
 
 
+def point_in_axis_aligned_box(point, center, size):
+    """Check if a point is inside an axis-aligned bounding box (ignores rotation).
+
+    Args:
+        point: (3,) array [x, y, z]
+        center: (3,) array box center
+        size: (3,) array [length, width, height]
+
+    Returns:
+        bool: True if point is inside the box
+    """
+    half_size = size / 2.0
+    return (
+        abs(point[0] - center[0]) <= half_size[0]
+        and abs(point[1] - center[1]) <= half_size[1]
+        and abs(point[2] - center[2]) <= half_size[2]
+    )
+
+
 def create_box_lineset(center, size, rotation_mat, color=None):
     """Create an Open3D LineSet for an oriented bounding box."""
     if color is None:
@@ -69,13 +88,14 @@ def create_box_lineset(center, size, rotation_mat, color=None):
     return line_set
 
 
-def build_geometries_for_sample(sample):
+def build_geometries_for_sample(sample, color_pts=False):
     """Generate Open3D geometries from a dataset sample without triggering rendering."""
     colors = [
-        [1.0, 0.0, 0.0],  # hopper — red
         [0.0, 1.0, 0.0],  # tractor — green
         [0.0, 0.0, 1.0],  # harvester — blue
         [1.0, 1.0, 0.0],  # trailer — yellow
+        [1.0, 0.5, 0.0],  # car — orange
+        [1.0, 0.0, 0.0],  # hopper — red
     ]
 
     pts = sample["point_clouds"].copy()
@@ -88,16 +108,27 @@ def build_geometries_for_sample(sample):
     pcd = o3d.geometry.PointCloud()
     pcd.points = o3d.utility.Vector3dVector(pts[:, :3])
 
+    # Initialize point colors: grayscale from intensity or default
     if pts.shape[1] == 4:
         intensity = pts[:, 3]
         intensity = (intensity - intensity.min()) / (intensity.max() - intensity.min() + 1e-6)
-        pcd.colors = o3d.utility.Vector3dVector(
-            np.column_stack([intensity, intensity, intensity])
-        )
+        point_colors = np.column_stack([intensity, intensity, intensity])
     else:
-        pcd.colors = o3d.utility.Vector3dVector(
-            np.ones((pts.shape[0], 3)) * 0.7
-        )
+        point_colors = np.ones((pts.shape[0], 3)) * 0.7
+
+    # Color points that are inside bounding boxes (if enabled)
+    if color_pts:
+        # For each point, check all boxes and assign the first matching box's color
+        for j in range(pts.shape[0]):
+            for i in range(len(gt_present)):
+                if gt_present[i] < 0.5:
+                    continue
+                if point_in_axis_aligned_box(pts[j, :3], gt_box_centers[i], gt_box_sizes[i]):
+                    cls_id = int(gt_sem_cls[i])
+                    point_colors[j] = colors[min(cls_id, len(colors) - 1)]
+                    break  # Stop checking boxes for this point once a match is found
+
+    pcd.colors = o3d.utility.Vector3dVector(point_colors)
 
     geometries = [pcd]
 
@@ -119,11 +150,12 @@ def build_geometries_for_sample(sample):
 
 
 class DatasetViewer:
-    def __init__(self, dataset, start_idx=0, max_samples=None):
+    def __init__(self, dataset, start_idx=0, max_samples=None, color_pts=False):
         self.dataset = dataset
         self.current_idx = start_idx
         self.max_idx = min(start_idx + max_samples, len(dataset)) if max_samples else len(dataset)
         self.active_geometries = []
+        self.color_pts = color_pts
 
         # --- PLAYBACK SETTINGS ---
         self.playing = False
@@ -174,6 +206,13 @@ class DatasetViewer:
         print("[R]     : Reload current sample (see different augmentations)")
         print("[1-9]   : Scrub dataset (1=Start, 5=Middle, 9=End)")
         print("[Q]     : Quit")
+        print("-----------------------")
+
+        print("\n--- Class Legend ---")
+        class_names = ["tractor", "harvester", "trailer", "car", "hopper"]
+        color_symbols = ["🟢", "🔵", "🟡", "🟠", "🔴"]
+        for i, (name, symbol) in enumerate(zip(class_names, color_symbols)):
+            print(f"{symbol} {i}: {name}")
         print("-----------------------\n")
 
         # Load the initial sample
@@ -193,7 +232,7 @@ class DatasetViewer:
             self.active_geometries.clear()
 
             # 2. Build new geometries
-            new_geometries = build_geometries_for_sample(sample)
+            new_geometries = build_geometries_for_sample(sample, color_pts=self.color_pts)
 
             # 3. Add to visualizer
             for geom in new_geometries:
@@ -303,6 +342,7 @@ def main():
     parser.add_argument("--min-inliers", type=int, default=200)
     parser.add_argument("--apply-gravity-boxes", action="store_true")
     parser.add_argument("--apply-gravity-pts", action="store_true")
+    parser.add_argument("--color-pts", action="store_true", help="Color points inside bounding boxes")
 
     args = parser.parse_args()
 
@@ -350,7 +390,8 @@ def main():
     viewer = DatasetViewer(
         dataset=dataset,
         start_idx=args.start_idx,
-        max_samples=args.num_samples
+        max_samples=args.num_samples,
+        color_pts=args.color_pts
     )
     viewer.run()
 
