@@ -338,6 +338,8 @@ def main():
     parser.add_argument("--augment", action="store_true")
     parser.add_argument("--num-points", type=int, default=40000)
     parser.add_argument("--apply-t-rtk", action="store_true")
+    parser.add_argument("--apply-r-global", action="store_true",
+                        help="Apply per-timestamp global rotation to point cloud XYZ")
     parser.add_argument("--sensor", default="lslidar")
     parser.add_argument("--min-inliers", type=int, default=200)
     parser.add_argument("--apply-gravity-boxes", action="store_true")
@@ -370,6 +372,7 @@ def main():
             min_inliers=args.min_inliers,
             apply_t_rtk=args.apply_t_rtk,
             require_calibration=args.apply_t_rtk,
+            apply_r_global=args.apply_r_global,
             apply_r_level_to_boxes=args.apply_gravity_boxes,
             apply_r_level_to_points=args.apply_gravity_pts,
             require_gravity_align=args.apply_gravity_boxes or args.apply_gravity_pts,

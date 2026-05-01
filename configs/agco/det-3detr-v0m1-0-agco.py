@@ -126,10 +126,12 @@ data = dict(
         num_points=num_points,
         min_inliers=min_inliers,
         
-        apply_t_rtk=True,
+        apply_t_rtk=True, # Transform pts from sensor -> rtk
         require_calibration=True,
         
-        apply_r_level_to_boxes=False,
+        apply_r_global = True, # Transform pts + boxes from rtk -> global
+        
+        apply_r_level_to_boxes=False, # Transfor from global -> gravity leveled
         apply_r_level_to_points=False,
         require_gravity_align=False,
         # residual_rpy_warn_deg=5,
@@ -160,33 +162,37 @@ data = dict(
         
         apply_t_rtk=True,
         require_calibration=True,
-        
+
+        apply_r_global=True,
+
         apply_r_level_to_boxes=False,
         apply_r_level_to_points=False,
         require_gravity_align=False,
-        
+
         transform=[
             dict(type="PointSubsampleDetection", num_points=num_points),
         ],
     ),
-    
+
     test=dict(
         type=dataset_type,
         root_dir=data_root,
         meta_data_dir=meta_data_dir,
-        
+
         split="test",
         split_prefix="agco",
-        
+
         sensors=sensors,
         use_intensity=False,
-        
+
         num_points=num_points,
         min_inliers=min_inliers,
-        
+
         apply_t_rtk=True,
         require_calibration=True,
-        
+
+        apply_r_global=True,
+
         apply_r_level_to_boxes=False,
         apply_r_level_to_points=False,
         require_gravity_align=False,

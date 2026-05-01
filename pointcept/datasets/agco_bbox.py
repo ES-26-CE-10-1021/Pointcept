@@ -19,6 +19,7 @@ On-disk layout (per annotation root):
         <sensor>/pointcloud_raw/coord/<ts>.npy      # (N, 3) float32
         <sensor>/pointcloud_raw/intensity/<ts>.npy  # (N,)   float32 (optional)
         <sensor>/annotations/<ts>.json                   # flat per-ts boxes
+        <sensor>/global_transforms/<ts>.npy         # (4, 4) float64, sensor→global
         ...
 
 Per-timestamp bboxes JSON:
@@ -197,6 +198,12 @@ class AgcoBBoxV1(Dataset):
             that root/sensor.
         require_calibration (bool): if True and calibration.yml is missing, raise;
             if False (default), warn and skip T_rtk for that root/sensor.
+        apply_r_global (bool): if True, apply the pitch and roll components of the
+            per-timestamp global transform (`<sensor>/global_transforms/<ts>.npy`,
+            a 4×4 matrix) to both point cloud XYZ and box centers/orientations.
+            The 3×3 rotation is decomposed via ZYX Euler angles; yaw is discarded
+            so the scene retains its original horizontal heading. Translation is
+            ignored. Applied to points after T_rtk. Default False.
     """
 
     def __init__(
@@ -218,8 +225,9 @@ class AgcoBBoxV1(Dataset):
         apply_r_level_to_boxes=False,
         apply_t_rtk: bool = False,
         require_calibration: bool = False,
+        apply_r_global: bool = False,
     ):
-        assert split in ("train", "val"), f"Unknown split: {split}"
+        assert split in ("train", "val", "test"), f"Unknown split: {split}"
         assert len(sensors) > 0, "At least one sensor must be specified"
         self.root_dir = root_dir
         self.meta_data_dir = meta_data_dir
@@ -239,6 +247,7 @@ class AgcoBBoxV1(Dataset):
         self.apply_r_level_to_boxes = bool(apply_r_level_to_boxes)
         self.apply_t_rtk = bool(apply_t_rtk)
         self.require_calibration = bool(require_calibration)
+        self.apply_r_global = bool(apply_r_global)
         self.center_normalizing_range = [
             np.zeros((1, 3), dtype=np.float32),
             np.ones((1, 3), dtype=np.float32),
@@ -371,7 +380,7 @@ class AgcoBBoxV1(Dataset):
             abs_root, sensor, ts
         )
 
-        # --- Sensor → RTK frame (T_rtk), then RTK → levelled frame (R_level) ---
+        # --- Points: sensor → RTK frame (T_rtk, points only) ---
         if self.apply_t_rtk:
             t_rtk = self._t_rtk_map.get((ridx, sensor))
             if t_rtk is not None:
@@ -380,17 +389,42 @@ class AgcoBBoxV1(Dataset):
                     t_rot.apply(point_cloud[:, 0:3]) + t_trans
                 ).astype(np.float32)
 
+        # --- Points + boxes: RTK → global frame (R_global_mat rotation, per-timestamp) ---
+        R_global = None
+        if self.apply_r_global:
+            global_transform_path = os.path.join(
+                abs_root, sensor, "global_transforms", f"{ts}.npy"
+            )
+            R_global_mat = np.load(global_transform_path).astype(np.float64)
+            if R_global_mat.shape != (4, 4):
+                raise ValueError(
+                    f"Global transform at {global_transform_path} must be 4×4, "
+                    f"got {R_global_mat.shape}"
+                )
+            # Extract only pitch and roll; yaw (heading) is discarded so the
+            # scene stays in its original horizontal orientation.
+            _angles = Rot.from_matrix(R_global_mat[:3, :3]).as_euler("ZYX")
+            R_global = Rot.from_euler("ZYX", [0.0, _angles[1], _angles[2]])
+            point_cloud[:, 0:3] = R_global.apply(point_cloud[:, 0:3]).astype(
+                np.float32
+            )
+
+        # --- Points: global → levelled frame (R_level) ---
         if self.apply_r_level_to_points:
             point_cloud[:, 0:3] = R.apply(point_cloud[:, 0:3]).astype(np.float32)
 
         n_boxes = centers_raw.shape[0]
         if n_boxes > 0:
+            q_boxes = Rot.from_quat(quats_xyzw)
+            if R_global is not None:
+                centers_raw = R_global.apply(centers_raw)
+                q_boxes = R_global * q_boxes
             if self.apply_r_level_to_boxes:
                 centers_raw = R.apply(centers_raw).astype(np.float32)
-                q_level = (R * Rot.from_quat(quats_xyzw)).as_quat()
+                q_boxes = R * q_boxes
             else:
                 centers_raw = centers_raw.astype(np.float32)
-                q_level = quats_xyzw
+            q_level = q_boxes.as_quat()
             rpy = Rot.from_quat(q_level).as_euler("xyz")
             yaws_raw = rpy[:, 2].astype(np.float32)
             if (
