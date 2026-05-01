@@ -58,8 +58,7 @@ from .scannet_detection import (
 # Background (disk label 0) is excluded; entries not in this dict are dropped.
 # Disk scheme: 0=background, 1=tractor, 2=harvester, 3=trailer, 4=car, 5=hopper
 # Model scheme: 0=hopper, 1=tractor, 2=harvester, 3=trailer, 4=car
-_DISK_LABEL_TO_CLASS = {0: 4, 1: 0, 2: 1, 3: 2, 4: 3} # <-- First dataset mapping
-# _DISK_LABEL_TO_CLASS = {1: 0, 2: 1, 3: 2, 4: 3, 5: 4} # <-- Proper dataset mapping
+_DISK_LABEL_TO_CLASS = {1: 0, 2: 1, 3: 2, 4: 3, 5: 4}
 
 
 def _load_r_level(path, require: bool):
