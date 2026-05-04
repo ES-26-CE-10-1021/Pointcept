@@ -166,6 +166,11 @@ class AgcoBBoxV1(Dataset):
             ``PointSubsampleDetection``.
         use_intensity (bool): if True, append per-point intensity as a 4th
             channel when intensity .npy is present; otherwise zeros.
+        utonia_preprocess (bool): if True, right-pad ``point_clouds`` with
+            zero-channels so the per-point feature width is 9
+            ``[xyz, rgb=0, normal=0]``, matching the Utonia (PT-v3m3)
+            checkpoint's ``in_channels=9``. Padding happens after augmentation
+            and the safety-net subsample. Default False.
         transform (list[dict] | None): Pointcept-style augmentation pipeline.
             Each entry is a config dict for a transform registered in the
             ``TRANSFORMS`` registry; the detection-aware transforms in
@@ -214,6 +219,7 @@ class AgcoBBoxV1(Dataset):
         sensors=("lslidar",),
         num_points=80000,
         use_intensity=False,
+        utonia_preprocess=False,
         transform=None,
         require_gravity_align=True,
         residual_rpy_warn_deg=2.0,
@@ -238,6 +244,7 @@ class AgcoBBoxV1(Dataset):
         self.sensors = tuple(sensors)
         self.num_points = int(num_points)
         self.use_intensity = bool(use_intensity)
+        self.utonia_preprocess = bool(utonia_preprocess)
         from .transform import Compose
         self.transform = Compose(transform or [])
         self.require_gravity_align = bool(require_gravity_align)
@@ -474,6 +481,21 @@ class AgcoBBoxV1(Dataset):
             else:
                 point_cloud, _ = _random_sampling(point_cloud, self.num_points)
         point_cloud = point_cloud.astype(np.float32)
+
+        # Pad to 9 feature channels for the Utonia (PT-v3m3) pre-encoder,
+        # which was pretrained with in_channels=9 ([xyz, rgb, normal]).
+        if self.utonia_preprocess:
+            n_pad = 9 - point_cloud.shape[1]
+            if n_pad < 0:
+                raise ValueError(
+                    f"utonia_preprocess: point_cloud already has "
+                    f"{point_cloud.shape[1]} channels (>9)."
+                )
+            if n_pad > 0:
+                point_cloud = np.concatenate(
+                    [point_cloud, np.zeros((point_cloud.shape[0], n_pad), dtype=np.float32)],
+                    axis=1,
+                )
 
         # --- Pad to MAX_NUM_OBJ (cap to MAX after augmentation) ---
         M = self.max_num_obj

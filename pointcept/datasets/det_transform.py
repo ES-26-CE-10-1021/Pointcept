@@ -384,6 +384,11 @@ class PointSubsampleDetection(object):
         n = pc.shape[0]
         if n == self.num_points:
             return data_dict
+        if n == 0:
+            data_dict["point_cloud"] = np.zeros(
+                (self.num_points, pc.shape[1]), dtype=pc.dtype
+            )
+            return data_dict
         replace = n < self.num_points
         choices = np.random.choice(n, self.num_points, replace=replace)
         data_dict["point_cloud"] = pc[choices]
