@@ -1,9 +1,10 @@
 #!/usr/bin/env python
 """
-Interactive Open3D visualization of AgcoBBoxV1 dataset.
+Interactive Open3D visualization of AgcoBBoxV1 dataset or 3DETR predictions.
 
-Loads samples directly from the AgcoBBoxV1 dataset class to test its output
-schema and transformations.
+Modes:
+  - dataset: Load from AgcoBBoxV1 dataset with GT boxes
+  - predictions: Load from saved test run (JSON + .npy files) with GT + pred boxes
 
 Controls:
     [→]     : Load next sample
@@ -15,6 +16,8 @@ Controls:
 """
 
 import argparse
+import json
+import os
 import sys
 import time
 
@@ -88,15 +91,35 @@ def create_box_lineset(center, size, rotation_mat, color=None):
     return line_set
 
 
+def create_box_lineset_from_corners(corners, color=None):
+    """Create an Open3D LineSet from 8 pre-computed world-space corners."""
+    if color is None:
+        color = [1.0, 1.0, 1.0]
+    corners = np.asarray(corners)
+    lines = [
+        [0, 1], [1, 2], [2, 3], [3, 0],  # bottom
+        [4, 5], [5, 6], [6, 7], [7, 4],  # top
+        [0, 4], [1, 5], [2, 6], [3, 7],  # verticals
+    ]
+    line_set = o3d.geometry.LineSet()
+    line_set.points = o3d.utility.Vector3dVector(corners)
+    line_set.lines = o3d.utility.Vector2iVector(lines)
+    line_set.colors = o3d.utility.Vector3dVector([color] * len(lines))
+    return line_set
+
+
+CLASS_COLORS = [
+    [0.0, 1.0, 0.0],  # tractor — green
+    [0.0, 0.0, 1.0],  # harvester — blue
+    [1.0, 1.0, 0.0],  # trailer — yellow
+    [1.0, 0.5, 0.0],  # car — orange
+    [1.0, 0.0, 0.0],  # hopper — red
+]
+
+
 def build_geometries_for_sample(sample, color_pts=False):
     """Generate Open3D geometries from a dataset sample without triggering rendering."""
-    colors = [
-        [0.0, 1.0, 0.0],  # tractor — green
-        [0.0, 0.0, 1.0],  # harvester — blue
-        [1.0, 1.0, 0.0],  # trailer — yellow
-        [1.0, 0.5, 0.0],  # car — orange
-        [1.0, 0.0, 0.0],  # hopper — red
-    ]
+    colors = CLASS_COLORS
 
     pts = sample["point_clouds"].copy()
     gt_box_centers = sample["gt_box_centers"]
@@ -149,13 +172,67 @@ def build_geometries_for_sample(sample, color_pts=False):
     return geometries
 
 
+def build_geometries_for_prediction(record, pts, score_thresh=0.0):
+    """Generate Open3D geometries from a saved prediction record."""
+    pcd = o3d.geometry.PointCloud()
+    pcd.points = o3d.utility.Vector3dVector(pts[:, :3])
+
+    if pts.shape[1] == 4:
+        intensity = pts[:, 3]
+        intensity = (intensity - intensity.min()) / (intensity.max() - intensity.min() + 1e-6)
+        pcd.colors = o3d.utility.Vector3dVector(np.column_stack([intensity] * 3))
+    else:
+        pcd.colors = o3d.utility.Vector3dVector(np.full((len(pts), 3), 0.7))
+
+    geometries = [pcd]
+
+    for box in record.get("gt_boxes", []):
+        cls_id = box["class_idx"]
+        color = CLASS_COLORS[min(cls_id, len(CLASS_COLORS) - 1)]
+        geometries.append(create_box_lineset_from_corners(box["box_corners"], color))
+
+    for box in record.get("predictions", []):
+        if box["score"] < score_thresh:
+            continue
+        cls_id = box["class_idx"]
+        base = CLASS_COLORS[min(cls_id, len(CLASS_COLORS) - 1)]
+        dim_color = [c * 0.5 for c in base]
+        geometries.append(create_box_lineset_from_corners(box["box_corners"], dim_color))
+
+    return geometries
+
+
+class PredictionDataset:
+    """Wraps a predictions directory to load saved test results."""
+    def __init__(self, predictions_dir, score_thresh=0.0):
+        self.predictions_dir = predictions_dir
+        self.score_thresh = score_thresh
+        manifest_path = os.path.join(predictions_dir, "manifest.json")
+        with open(manifest_path) as f:
+            self.manifest = json.load(f)
+
+    def __len__(self):
+        return len(self.manifest)
+
+    def __getitem__(self, idx):
+        entry = self.manifest[idx]
+        json_path = os.path.join(self.predictions_dir, entry["json_file"])
+        pts_path = os.path.join(self.predictions_dir, entry["points_file"])
+        with open(json_path) as f:
+            record = json.load(f)
+        pts = np.load(pts_path)
+        return record, pts
+
+
 class DatasetViewer:
-    def __init__(self, dataset, start_idx=0, max_samples=None, color_pts=False):
+    def __init__(self, dataset, start_idx=0, max_samples=None, color_pts=False,
+                 geometry_builder=None):
         self.dataset = dataset
         self.current_idx = start_idx
         self.max_idx = min(start_idx + max_samples, len(dataset)) if max_samples else len(dataset)
         self.active_geometries = []
         self.color_pts = color_pts
+        self.geometry_builder = geometry_builder or build_geometries_for_sample
 
         # --- PLAYBACK SETTINGS ---
         self.playing = False
@@ -222,17 +299,27 @@ class DatasetViewer:
         print(f"[{self.current_idx + 1}/{self.max_idx}] Loading sample {self.current_idx}...", end=" ", flush=True)
         try:
             sample = self.dataset[self.current_idx]
-            num_boxes = int(np.sum(sample["gt_box_present"]))
-            pts_shape = sample["point_clouds"].shape
-            print(f"OK ({pts_shape[0]} pts, {num_boxes} boxes)")
-            
+
+            # Dispatch: PredictionDataset returns (record, pts), AgcoBBoxV1 returns dict
+            if isinstance(sample, tuple):
+                record, pts = sample
+                new_geometries = self.geometry_builder(record, pts, score_thresh=self.dataset.score_thresh)
+                n_pred = sum(1 for b in record.get("predictions", []) if b["score"] >= self.dataset.score_thresh)
+                n_gt = len(record.get("gt_boxes", []))
+                print(f"OK (scan {record['scan_idx']}: {pts.shape[0]} pts, {n_pred} preds, {n_gt} GT)")
+            else:
+                new_geometries = self.geometry_builder(sample, color_pts=self.color_pts)
+                num_boxes = int(np.sum(sample["gt_box_present"]))
+                pts_shape = sample["point_clouds"].shape
+                print(f"OK ({pts_shape[0]} pts, {num_boxes} boxes)")
+
             # 1. Remove old geometries
             for geom in self.active_geometries:
                 self.vis.remove_geometry(geom, reset_bounding_box=False)
             self.active_geometries.clear()
 
-            # 2. Build new geometries
-            new_geometries = build_geometries_for_sample(sample, color_pts=self.color_pts)
+            # 2. Build new geometries already done above
+            # new_geometries = ...
 
             # 3. Add to visualizer
             for geom in new_geometries:
@@ -325,10 +412,15 @@ class DatasetViewer:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Visualize AgcoBBoxV1 dataset output in Open3D"
+        description="Visualize AgcoBBoxV1 dataset or 3DETR test predictions in Open3D"
     )
-    parser.add_argument("--root-dir", required=True, help="Path to data_root")
-    parser.add_argument("--meta-dir", required=True, help="Path to meta_data_dir")
+    parser.add_argument("--mode", choices=["dataset", "predictions"], default="dataset",
+                        help="Visualization mode")
+    parser.add_argument("--predictions-dir", help="Path to predictions/ directory (--mode predictions)")
+    parser.add_argument("--score-thresh", type=float, default=0.05,
+                        help="Min confidence score to display (predictions mode)")
+    parser.add_argument("--root-dir", help="Path to data_root (dataset mode)")
+    parser.add_argument("--meta-dir", help="Path to meta_data_dir (dataset mode)")
     parser.add_argument("--split", default="train", choices=["train", "val", "test"])
     parser.add_argument("--split-prefix", default="agco")
     parser.add_argument("--sensors", nargs="+", default=["lslidar"])
@@ -347,6 +439,26 @@ def main():
     parser.add_argument("--color-pts", action="store_true", help="Color points inside bounding boxes")
 
     args = parser.parse_args()
+
+    if args.mode == "predictions":
+        if not args.predictions_dir:
+            parser.error("--predictions-dir is required with --mode predictions")
+        dataset = PredictionDataset(args.predictions_dir, score_thresh=args.score_thresh)
+        viewer = DatasetViewer(
+            dataset=dataset,
+            start_idx=args.start_idx,
+            max_samples=args.num_samples,
+            geometry_builder=build_geometries_for_prediction,
+        )
+        print(f"Predictions: {len(dataset)} scans (score_thresh={args.score_thresh})\n")
+        viewer.run()
+        return
+
+    if args.mode != "dataset":
+        parser.error(f"Unknown mode: {args.mode}")
+
+    if not args.root_dir or not args.meta_dir:
+        parser.error("--root-dir and --meta-dir are required with --mode dataset")
 
     transform = [dict(type="PointSubsampleDetection", num_points=args.num_points)]
     if args.augment:

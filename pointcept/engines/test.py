@@ -1601,6 +1601,10 @@ class ObjDetTester(TesterBase):
         class_names (list[str]): ordered class name strings
     """
 
+    def __init__(self, cfg, model=None, test_loader=None, verbose=False, save_predictions=False):
+        super().__init__(cfg, model, test_loader, verbose)
+        self.save_predictions = save_predictions
+
     def test(self):
         from pointcept.models.detection_3detr.dataset_config import _setup_3detr_path
         _setup_3detr_path()
@@ -1635,6 +1639,18 @@ class ObjDetTester(TesterBase):
 
         self.model.eval()
 
+        predictions_dir = None
+        if self.save_predictions:
+            predictions_dir = os.path.join(self.cfg.save_path, "predictions")
+            if comm.is_main_process():
+                make_dirs(predictions_dir)
+            comm.synchronize()
+
+        dataset = self.test_loader.dataset
+        local_scan_meta = {}
+        local_scan_counter = 0
+        local_gt_boxes = {}  # local_id -> list of (cls_int, corners)
+
         for idx, batch in enumerate(self.test_loader):
             for key in batch:
                 if isinstance(batch[key], torch.Tensor):
@@ -1645,6 +1661,42 @@ class ObjDetTester(TesterBase):
 
             ap_calculator.step_meter(outputs, batch)
 
+            if self.save_predictions:
+                B = batch["scan_idx"].shape[0]
+                for b in range(B):
+                    s_idx = batch["scan_idx"][b].item()
+                    ridx, sensor, ts = dataset.samples[s_idx % len(dataset.samples)]
+                    abs_root = dataset.roots[ridx]
+                    coord_path = os.path.join(
+                        str(abs_root), sensor, "pointcloud_raw", "coord", f"{ts}.npy"
+                    )
+
+                    local_scan_meta[local_scan_counter] = {
+                        "scan_idx": s_idx,
+                        "sensor": sensor,
+                        "timestamp": ts,
+                        "annotation_root": str(abs_root),
+                        "coord_path": coord_path,
+                        "point_cloud_dims_min": batch["point_cloud_dims_min"][b].cpu().numpy().tolist(),
+                        "point_cloud_dims_max": batch["point_cloud_dims_max"][b].cpu().numpy().tolist(),
+                    }
+
+                    np.save(
+                        os.path.join(predictions_dir, f"{s_idx}_points.npy"),
+                        batch["point_clouds"][b].cpu().numpy(),
+                    )
+
+                    gt_boxes = []
+                    if "gt_box_corners" in batch:
+                        corners = batch["gt_box_corners"][b].cpu().numpy()
+                        labels = batch["gt_box_sem_cls_label"][b].cpu().numpy()
+                        present = batch["gt_box_present"][b].cpu().numpy()
+                        for i, (c, l, p) in enumerate(zip(corners, labels, present)):
+                            if p > 0.5:
+                                gt_boxes.append((int(l), c.tolist()))
+                    local_gt_boxes[local_scan_counter] = gt_boxes
+                    local_scan_counter += 1
+
             if (idx + 1) % 20 == 0 or (idx + 1) == len(self.test_loader):
                 logger.info(f"Processed {idx + 1}/{len(self.test_loader)} batches")
 
@@ -1652,13 +1704,19 @@ class ObjDetTester(TesterBase):
         comm.synchronize()
         all_pred = comm.gather(ap_calculator.pred_map_cls, dst=0)
         all_gt = comm.gather(ap_calculator.gt_map_cls, dst=0)
+        all_meta = comm.gather(local_scan_meta, dst=0)
+        all_gt_boxes = comm.gather(local_gt_boxes, dst=0)
 
         if comm.is_main_process():
-            merged_pred, merged_gt, scan_cnt = {}, {}, 0
-            for pred_dict, gt_dict in zip(all_pred, all_gt):
+            merged_pred, merged_gt, merged_meta, merged_gt_boxes, scan_cnt = {}, {}, {}, {}, 0
+            for pred_dict, gt_dict, meta_dict, gt_boxes_dict in zip(all_pred, all_gt, all_meta, all_gt_boxes):
                 for local_id in sorted(pred_dict.keys()):
                     merged_pred[scan_cnt] = pred_dict[local_id]
                     merged_gt[scan_cnt] = gt_dict[local_id]
+                    if local_id in meta_dict:
+                        merged_meta[scan_cnt] = meta_dict[local_id]
+                    if local_id in gt_boxes_dict:
+                        merged_gt_boxes[scan_cnt] = gt_boxes_dict[local_id]
                     scan_cnt += 1
             ap_calculator.pred_map_cls = merged_pred
             ap_calculator.gt_map_cls = merged_gt
@@ -1696,6 +1754,56 @@ class ObjDetTester(TesterBase):
                         wandb_dict["test_finegrained/Rec25_{}".format(cls_name)] = metrics[0.25].get(rec_key, float("nan")) * 100
                         wandb_dict["test_finegrained/Rec50_{}".format(cls_name)] = metrics[0.5].get(rec_key, float("nan")) * 100
                     wandb.log(wandb_dict)
+
+            if self.save_predictions:
+                manifest = []
+                for sc in sorted(merged_meta.keys()):
+                    meta = merged_meta[sc]
+                    s_idx = meta["scan_idx"]
+
+                    preds = [
+                        {
+                            "class_idx": int(cls_int),
+                            "class_name": class_names[cls_int] if cls_int < len(class_names) else str(cls_int),
+                            "score": float(score),
+                            "box_corners": np.asarray(corners).tolist(),
+                        }
+                        for cls_int, corners, score in merged_pred.get(sc, [])
+                    ]
+
+                    gts = [
+                        {
+                            "class_idx": int(cls_int),
+                            "class_name": class_names[cls_int] if cls_int < len(class_names) else str(cls_int),
+                            "box_corners": corners,
+                        }
+                        for cls_int, corners in merged_gt_boxes.get(sc, [])
+                    ]
+
+                    record = {
+                        **meta,
+                        "class_names": class_names,
+                        "predictions": preds,
+                        "gt_boxes": gts,
+                    }
+                    json_path = os.path.join(predictions_dir, f"{s_idx}.json")
+                    with open(json_path, "w") as f:
+                        json.dump(record, f)
+
+                    manifest.append({
+                        "scan_idx": s_idx,
+                        "json_file": f"{s_idx}.json",
+                        "points_file": f"{s_idx}_points.npy",
+                    })
+
+                with open(os.path.join(predictions_dir, "manifest.json"), "w") as f:
+                    json.dump(manifest, f, indent=2)
+
+                summary = {"AP25": float(ap25), "AP50": float(ap50), "AR25": float(ar25), "AR50": float(ar50)}
+                with open(os.path.join(predictions_dir, "metrics.json"), "w") as f:
+                    json.dump(summary, f, indent=2)
+
+                logger.info(f"Predictions saved to {predictions_dir} ({len(manifest)} scans)")
 
         comm.synchronize()
 
