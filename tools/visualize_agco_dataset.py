@@ -307,6 +307,23 @@ class DatasetViewer:
                 n_pred = sum(1 for b in record.get("predictions", []) if b["score"] >= self.dataset.score_thresh)
                 n_gt = len(record.get("gt_boxes", []))
                 print(f"OK (scan {record['scan_idx']}: {pts.shape[0]} pts, {n_pred} preds, {n_gt} GT)")
+                diag = record.get("diagnostics", {})
+                if diag:
+                    print(
+                        "  diag: center_delta mean/max = "
+                        f"{diag.get('mean_l2_center_delta_corners_vs_gt_centers', float('nan')):.3f}/"
+                        f"{diag.get('max_l2_center_delta_corners_vs_gt_centers', float('nan')):.3f}"
+                    )
+                cfg_diag = record.get("dataset_config_diagnostics", {})
+                if cfg_diag:
+                    print(
+                        "  cfg: "
+                        f"split={cfg_diag.get('split')} sensors={cfg_diag.get('sensors')} "
+                        f"num_points={cfg_diag.get('num_points')} min_inliers={cfg_diag.get('min_inliers')} "
+                        f"apply_t_rtk={cfg_diag.get('apply_t_rtk')} apply_r_global={cfg_diag.get('apply_r_global')} "
+                        f"apply_r_level_to_points={cfg_diag.get('apply_r_level_to_points')} "
+                        f"apply_r_level_to_boxes={cfg_diag.get('apply_r_level_to_boxes')}"
+                    )
             else:
                 new_geometries = self.geometry_builder(sample, color_pts=self.color_pts)
                 num_boxes = int(np.sum(sample["gt_box_present"]))

@@ -1679,6 +1679,7 @@ class ObjDetTester(TesterBase):
                         "coord_path": coord_path,
                         "point_cloud_dims_min": batch["point_cloud_dims_min"][b].cpu().numpy().tolist(),
                         "point_cloud_dims_max": batch["point_cloud_dims_max"][b].cpu().numpy().tolist(),
+                        "diagnostics": {},
                     }
 
                     np.save(
@@ -1689,11 +1690,25 @@ class ObjDetTester(TesterBase):
                     gt_boxes = []
                     if "gt_box_corners" in batch:
                         corners = batch["gt_box_corners"][b].cpu().numpy()
+                        centers = batch["gt_box_centers"][b].cpu().numpy()
+                        sizes = batch["gt_box_sizes"][b].cpu().numpy()
+                        angles = batch["gt_box_angles"][b].cpu().numpy()
                         labels = batch["gt_box_sem_cls_label"][b].cpu().numpy()
                         present = batch["gt_box_present"][b].cpu().numpy()
+                        center_delta = []
                         for i, (c, l, p) in enumerate(zip(corners, labels, present)):
                             if p > 0.5:
+                                center_delta.append(np.linalg.norm(np.mean(c, axis=0) - centers[i]))
                                 gt_boxes.append((int(l), c.tolist()))
+                        if center_delta:
+                            local_scan_meta[local_scan_counter]["diagnostics"] = {
+                                "num_gt": int(len(center_delta)),
+                                "mean_l2_center_delta_corners_vs_gt_centers": float(np.mean(center_delta)),
+                                "max_l2_center_delta_corners_vs_gt_centers": float(np.max(center_delta)),
+                                "sample_gt_centers": centers[present > 0.5][:3].tolist(),
+                                "sample_gt_sizes": sizes[present > 0.5][:3].tolist(),
+                                "sample_gt_angles": angles[present > 0.5][:3].tolist(),
+                            }
                     local_gt_boxes[local_scan_counter] = gt_boxes
                     local_scan_counter += 1
 
@@ -1756,6 +1771,16 @@ class ObjDetTester(TesterBase):
                     wandb.log(wandb_dict)
 
             if self.save_predictions:
+                dataset_cfg_diag = {
+                    "split": getattr(dataset, "split", None),
+                    "num_points": getattr(dataset, "num_points", None),
+                    "min_inliers": getattr(dataset, "min_inliers", None),
+                    "apply_t_rtk": getattr(dataset, "apply_t_rtk", None),
+                    "apply_r_global": getattr(dataset, "apply_r_global", None),
+                    "apply_r_level_to_points": getattr(dataset, "apply_r_level_to_points", None),
+                    "apply_r_level_to_boxes": getattr(dataset, "apply_r_level_to_boxes", None),
+                    "sensors": list(getattr(dataset, "sensors", [])) if hasattr(dataset, "sensors") else None,
+                }
                 manifest = []
                 for sc in sorted(merged_meta.keys()):
                     meta = merged_meta[sc]
@@ -1783,6 +1808,7 @@ class ObjDetTester(TesterBase):
                     record = {
                         **meta,
                         "class_names": class_names,
+                        "dataset_config_diagnostics": dataset_cfg_diag,
                         "predictions": preds,
                         "gt_boxes": gts,
                     }
