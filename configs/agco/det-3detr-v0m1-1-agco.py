@@ -137,7 +137,7 @@ data = dict(
         # residual_rpy_warn_deg=5,
         
         transform=[
-            dict(type="RandomFlipDetection", p_x=0.0, p_y=0.5),
+            dict(type="RandomFlipDetection", p_x=0.5, p_y=0.5),
             dict(type="RandomRotateZDetection", angle_deg=(-5.0, 5.0)),
             # dict(type="RandomScaleDetection", scale=(0.9, 1.1), apply_to_sizes=True),
             # dict(type="RandomJitterDetection", sigma=0.005, clip=0.02),
@@ -151,7 +151,7 @@ data = dict(
         root_dir=data_root,
         meta_data_dir=meta_data_dir,
         
-        split="val",
+        split="train",
         split_prefix="agco",
         
         sensors=sensors,
@@ -179,7 +179,7 @@ data = dict(
         root_dir=data_root,
         meta_data_dir=meta_data_dir,
 
-        split="test",
+        split="train",
         split_prefix="agco",
 
         sensors=sensors,
