@@ -49,6 +49,10 @@ from scipy.spatial.transform import Rotation as Rot
 from torch.utils.data import Dataset
 
 from .builder import DATASETS
+from pointcept.models.detection_3detr.dataset_config import (
+    _setup_3detr_path,
+    wrap_angle_np,
+)
 from .scannet_detection import (
     MEAN_COLOR_RGB,  # noqa: F401 - kept for parity; may be used later
     _random_sampling,
@@ -125,8 +129,6 @@ def _load_t_rtk(calib_path: str, sensor: str, require: bool):
 
 
 def _flip_axis_to_camera_np(points):
-    from pointcept.models.detection_3detr.dataset_config import _setup_3detr_path
-
     _setup_3detr_path()
     from utils.box_util import flip_axis_to_camera_np
 
@@ -134,8 +136,6 @@ def _flip_axis_to_camera_np(points):
 
 
 def _get_3d_box_batch_np(sizes, angles, centers_upright):
-    from pointcept.models.detection_3detr.dataset_config import _setup_3detr_path
-
     _setup_3detr_path()
     from utils.box_util import get_3d_box_batch_np
 
@@ -225,6 +225,9 @@ class AgcoBBoxV1(Dataset):
         apply_t_rtk: bool = False,
         require_calibration: bool = False,
         apply_r_global: bool = False,
+        deterministic_debug: bool = False,
+        deterministic_seed: int = 0,
+        debug_roundtrip_check: bool = False,
     ):
         assert split in ("train", "val", "test"), f"Unknown split: {split}"
         assert len(sensors) > 0, "At least one sensor must be specified"
@@ -247,6 +250,9 @@ class AgcoBBoxV1(Dataset):
         self.apply_t_rtk = bool(apply_t_rtk)
         self.require_calibration = bool(require_calibration)
         self.apply_r_global = bool(apply_r_global)
+        self.deterministic_debug = bool(deterministic_debug)
+        self.deterministic_seed = int(deterministic_seed)
+        self.debug_roundtrip_check = bool(debug_roundtrip_check)
         self.center_normalizing_range = [
             np.zeros((1, 3), dtype=np.float32),
             np.ones((1, 3), dtype=np.float32),
@@ -425,7 +431,7 @@ class AgcoBBoxV1(Dataset):
                 centers_raw = centers_raw.astype(np.float32)
             q_level = q_boxes.as_quat()
             rpy = Rot.from_quat(q_level).as_euler("xyz")
-            yaws_raw = rpy[:, 2].astype(np.float32)
+            yaws_raw = wrap_angle_np(rpy[:, 2]).astype(np.float32)
             if (
                 self.apply_r_level_to_boxes
                 and np.max(np.abs(rpy[:, :2])) > self.residual_rpy_warn_rad
@@ -458,7 +464,15 @@ class AgcoBBoxV1(Dataset):
 
         # --- Safety-net subsample (idempotent if pipeline already did it) ---
         if point_cloud.shape[0] != self.num_points:
-            point_cloud, _ = _random_sampling(point_cloud, self.num_points)
+            if self.deterministic_debug:
+                rng = np.random.default_rng(self.deterministic_seed + int(idx))
+                if point_cloud.shape[0] >= self.num_points:
+                    choices = rng.choice(point_cloud.shape[0], self.num_points, replace=False)
+                else:
+                    choices = rng.choice(point_cloud.shape[0], self.num_points, replace=True)
+                point_cloud = point_cloud[choices]
+            else:
+                point_cloud, _ = _random_sampling(point_cloud, self.num_points)
         point_cloud = point_cloud.astype(np.float32)
 
         # --- Pad to MAX_NUM_OBJ (cap to MAX after augmentation) ---
@@ -513,6 +527,19 @@ class AgcoBBoxV1(Dataset):
             centers_upright,
         ).squeeze(0).astype(np.float32)
 
+        roundtrip_diag = {}
+        if self.debug_roundtrip_check and num_gt > 0:
+            centers_cam = _flip_axis_to_camera_np(gt_centers[:num_gt][np.newaxis, ...]).squeeze(0)
+            centers_back = np.empty_like(centers_cam)
+            centers_back[:, 0] = centers_cam[:, 0]
+            centers_back[:, 1] = centers_cam[:, 2]
+            centers_back[:, 2] = -centers_cam[:, 1]
+            center_err = np.linalg.norm(centers_back - gt_centers[:num_gt], axis=1)
+            roundtrip_diag = {
+                "center_l2_mean": float(np.mean(center_err)),
+                "center_l2_max": float(np.max(center_err)),
+            }
+
         return {
             "point_clouds": point_cloud,
             "point_cloud_dims_min": point_cloud_dims_min,
@@ -528,4 +555,16 @@ class AgcoBBoxV1(Dataset):
             "gt_box_present": gt_present,
             "gt_box_corners": box_corners,
             "scan_idx": np.array(idx, dtype=np.int64),
+            "frame_id": "agco_lidar_canonical",
+            "frame_meta": {
+                "apply_t_rtk": self.apply_t_rtk,
+                "apply_r_global": self.apply_r_global,
+                "apply_r_level_to_points": self.apply_r_level_to_points,
+                "apply_r_level_to_boxes": self.apply_r_level_to_boxes,
+                "sensor": sensor,
+                "timestamp": ts,
+                "root": os.path.basename(abs_root),
+                "deterministic_debug": self.deterministic_debug,
+            },
+            "roundtrip_diag": roundtrip_diag,
         }

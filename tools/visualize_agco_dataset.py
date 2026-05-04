@@ -221,7 +221,8 @@ def build_geometries_for_prediction(record, pts, score_thresh=0.0):
         cls_id = box["class_idx"]
         base = CLASS_COLORS[min(cls_id, len(CLASS_COLORS) - 1)]
         dim_color = [c * 0.5 for c in base]
-        geometries.append(create_box_lineset_from_corners(box["box_corners"], dim_color))
+        pred_corners = camera_to_lidar_np(np.asarray(box["box_corners"]))
+        geometries.append(create_box_lineset_from_corners(pred_corners, dim_color))
 
     return geometries
 

@@ -28,6 +28,29 @@ from utils.box_util import flip_axis_to_camera_np, flip_axis_to_camera_tensor
 from utils.box_util import get_3d_box_batch_np, get_3d_box_batch_tensor
 
 
+def flip_axis_to_lidar_np(pc):
+    """Inverse of `flip_axis_to_camera_np`: [x, y, z] -> [x, z, -y]."""
+    pc2 = np.asarray(pc).copy()
+    pc2[..., 0] = pc[..., 0]
+    pc2[..., 1] = pc[..., 2]
+    pc2[..., 2] = -pc[..., 1]
+    return pc2
+
+
+def flip_axis_to_lidar_tensor(pc):
+    """Inverse of `flip_axis_to_camera_tensor`: [x, y, z] -> [x, z, -y]."""
+    pc2 = torch.clone(pc)
+    pc2[..., 0] = pc[..., 0]
+    pc2[..., 1] = pc[..., 2]
+    pc2[..., 2] = -pc[..., 1]
+    return pc2
+
+
+def wrap_angle_np(angle):
+    """Wrap radians to (-pi, pi]."""
+    return (np.asarray(angle) + np.pi) % (2 * np.pi) - np.pi
+
+
 @MODULES.register_module()
 class ScanNetDetectionConfig:
     """Dataset configuration for ScanNet 3D object detection (18 classes)."""

@@ -1680,7 +1680,36 @@ class ObjDetTester(TesterBase):
                         "point_cloud_dims_min": batch["point_cloud_dims_min"][b].cpu().numpy().tolist(),
                         "point_cloud_dims_max": batch["point_cloud_dims_max"][b].cpu().numpy().tolist(),
                         "diagnostics": {},
+                        "frame_id": "agco_lidar_canonical",
                     }
+                    if "frame_meta" in batch:
+                        fm = batch["frame_meta"]
+                        if isinstance(fm, list):
+                            local_scan_meta[local_scan_counter]["frame_meta"] = fm[b]
+                        elif isinstance(fm, dict):
+                            curr = {}
+                            for k, v in fm.items():
+                                if isinstance(v, torch.Tensor):
+                                    curr[k] = v[b].item() if v.ndim > 0 else v.item()
+                                elif isinstance(v, list):
+                                    curr[k] = v[b]
+                                else:
+                                    curr[k] = v
+                            local_scan_meta[local_scan_counter]["frame_meta"] = curr
+                    if "roundtrip_diag" in batch:
+                        rd = batch["roundtrip_diag"]
+                        if isinstance(rd, list):
+                            local_scan_meta[local_scan_counter]["roundtrip_diag"] = rd[b]
+                        elif isinstance(rd, dict):
+                            curr = {}
+                            for k, v in rd.items():
+                                if isinstance(v, torch.Tensor):
+                                    curr[k] = v[b].item() if v.ndim > 0 else v.item()
+                                elif isinstance(v, list):
+                                    curr[k] = v[b]
+                                else:
+                                    curr[k] = v
+                            local_scan_meta[local_scan_counter]["roundtrip_diag"] = curr
 
                     np.save(
                         os.path.join(predictions_dir, f"{s_idx}_points.npy"),
@@ -1849,6 +1878,14 @@ class ObjDetTester(TesterBase):
                     json.dump(manifest, f, indent=2)
 
                 summary = {"AP25": float(ap25), "AP50": float(ap50), "AR25": float(ar25), "AR50": float(ar50)}
+                rtrip = [
+                    m.get("roundtrip_diag", {})
+                    for m in merged_meta.values()
+                    if m.get("roundtrip_diag")
+                ]
+                if rtrip:
+                    summary["roundtrip_center_l2_mean"] = float(np.mean([d["center_l2_mean"] for d in rtrip]))
+                    summary["roundtrip_center_l2_max"] = float(np.max([d["center_l2_max"] for d in rtrip]))
                 with open(os.path.join(predictions_dir, "metrics.json"), "w") as f:
                     json.dump(summary, f, indent=2)
 
