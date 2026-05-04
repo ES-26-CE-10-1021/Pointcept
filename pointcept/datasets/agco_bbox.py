@@ -527,7 +527,12 @@ class AgcoBBoxV1(Dataset):
             centers_upright,
         ).squeeze(0).astype(np.float32)
 
-        roundtrip_diag = {}
+        roundtrip_diag = {
+            "enabled": bool(self.debug_roundtrip_check),
+            "num_gt": int(num_gt),
+            "center_l2_mean": float("nan"),
+            "center_l2_max": float("nan"),
+        }
         if self.debug_roundtrip_check and num_gt > 0:
             centers_cam = _flip_axis_to_camera_np(gt_centers[:num_gt][np.newaxis, ...]).squeeze(0)
             centers_back = np.empty_like(centers_cam)
@@ -535,10 +540,8 @@ class AgcoBBoxV1(Dataset):
             centers_back[:, 1] = centers_cam[:, 2]
             centers_back[:, 2] = -centers_cam[:, 1]
             center_err = np.linalg.norm(centers_back - gt_centers[:num_gt], axis=1)
-            roundtrip_diag = {
-                "center_l2_mean": float(np.mean(center_err)),
-                "center_l2_max": float(np.max(center_err)),
-            }
+            roundtrip_diag["center_l2_mean"] = float(np.mean(center_err))
+            roundtrip_diag["center_l2_max"] = float(np.max(center_err))
 
         return {
             "point_clouds": point_cloud,
