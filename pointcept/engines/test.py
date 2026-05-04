@@ -1688,6 +1688,7 @@ class ObjDetTester(TesterBase):
                     )
 
                     gt_boxes = []
+                    gt_boxes_param = []
                     if "gt_box_corners" in batch:
                         corners = batch["gt_box_corners"][b].cpu().numpy()
                         centers = batch["gt_box_centers"][b].cpu().numpy()
@@ -1700,6 +1701,14 @@ class ObjDetTester(TesterBase):
                             if p > 0.5:
                                 center_delta.append(np.linalg.norm(np.mean(c, axis=0) - centers[i]))
                                 gt_boxes.append((int(l), c.tolist()))
+                                gt_boxes_param.append(
+                                    {
+                                        "class_idx": int(l),
+                                        "center": centers[i].tolist(),
+                                        "size": sizes[i].tolist(),
+                                        "yaw": float(angles[i]),
+                                    }
+                                )
                         if center_delta:
                             local_scan_meta[local_scan_counter]["diagnostics"] = {
                                 "num_gt": int(len(center_delta)),
@@ -1709,7 +1718,10 @@ class ObjDetTester(TesterBase):
                                 "sample_gt_sizes": sizes[present > 0.5][:3].tolist(),
                                 "sample_gt_angles": angles[present > 0.5][:3].tolist(),
                             }
-                    local_gt_boxes[local_scan_counter] = gt_boxes
+                    local_gt_boxes[local_scan_counter] = {
+                        "corners": gt_boxes,
+                        "param": gt_boxes_param,
+                    }
                     local_scan_counter += 1
 
             if (idx + 1) % 20 == 0 or (idx + 1) == len(self.test_loader):
@@ -1802,7 +1814,17 @@ class ObjDetTester(TesterBase):
                             "class_name": class_names[cls_int] if cls_int < len(class_names) else str(cls_int),
                             "box_corners": corners,
                         }
-                        for cls_int, corners in merged_gt_boxes.get(sc, [])
+                        for cls_int, corners in merged_gt_boxes.get(sc, {}).get("corners", [])
+                    ]
+
+                    gts_param = [
+                        {
+                            **box,
+                            "class_name": class_names[box["class_idx"]]
+                            if box["class_idx"] < len(class_names)
+                            else str(box["class_idx"]),
+                        }
+                        for box in merged_gt_boxes.get(sc, {}).get("param", [])
                     ]
 
                     record = {
@@ -1811,6 +1833,7 @@ class ObjDetTester(TesterBase):
                         "dataset_config_diagnostics": dataset_cfg_diag,
                         "predictions": preds,
                         "gt_boxes": gts,
+                        "gt_boxes_param": gts_param,
                     }
                     json_path = os.path.join(predictions_dir, f"{s_idx}.json")
                     with open(json_path, "w") as f:

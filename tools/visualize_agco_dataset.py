@@ -117,6 +117,16 @@ CLASS_COLORS = [
 ]
 
 
+def camera_to_lidar_np(points):
+    """Inverse of 3DETR flip_axis_to_camera_np: [x, y, z] -> [x, z, -y]."""
+    pts = np.asarray(points)
+    out = pts.copy()
+    out[..., 0] = pts[..., 0]
+    out[..., 1] = pts[..., 2]
+    out[..., 2] = -pts[..., 1]
+    return out
+
+
 def build_geometries_for_sample(sample, color_pts=False):
     """Generate Open3D geometries from a dataset sample without triggering rendering."""
     colors = CLASS_COLORS
@@ -186,10 +196,24 @@ def build_geometries_for_prediction(record, pts, score_thresh=0.0):
 
     geometries = [pcd]
 
-    for box in record.get("gt_boxes", []):
-        cls_id = box["class_idx"]
-        color = CLASS_COLORS[min(cls_id, len(CLASS_COLORS) - 1)]
-        geometries.append(create_box_lineset_from_corners(box["box_corners"], color))
+    # Preferred future-proof path: draw GT from center/size/yaw in point-cloud frame.
+    gt_param = record.get("gt_boxes_param", [])
+    if gt_param:
+        for box in gt_param:
+            cls_id = box["class_idx"]
+            color = CLASS_COLORS[min(cls_id, len(CLASS_COLORS) - 1)]
+            center = np.asarray(box["center"], dtype=np.float64)
+            size = np.asarray(box["size"], dtype=np.float64)
+            yaw = float(box["yaw"])
+            rot_mat = Rot.from_euler("xyz", [0.0, 0.0, yaw]).as_matrix()
+            geometries.append(create_box_lineset(center, size, rot_mat, color))
+    else:
+        # Backward compatibility for old exports that only stored camera/upright corners.
+        for box in record.get("gt_boxes", []):
+            cls_id = box["class_idx"]
+            color = CLASS_COLORS[min(cls_id, len(CLASS_COLORS) - 1)]
+            gt_corners = camera_to_lidar_np(np.asarray(box["box_corners"]))
+            geometries.append(create_box_lineset_from_corners(gt_corners, color))
 
     for box in record.get("predictions", []):
         if box["score"] < score_thresh:
