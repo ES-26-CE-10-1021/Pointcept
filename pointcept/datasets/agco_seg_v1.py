@@ -1,0 +1,463 @@
+"""
+AGCO bounding-box detection dataset (AgcoSegV1) for pointtransformer.
+
+Each sample is one `(sensor, timestamp)` pair. Per-timestamp LiDAR scans and
+"""
+
+import json
+import os
+import warnings
+
+import numpy as np
+import torch
+from scipy.spatial.transform import Rotation as Rot
+from torch.utils.data import Dataset
+
+from .scannet_detection import (
+    MEAN_COLOR_RGB,  # noqa: F401 - kept for parity; may be used later
+    _random_sampling,
+)
+
+
+from .builder import DATASETS
+
+def _load_r_level(path, require: bool):
+    if os.path.isfile(path):
+        data = np.load(path)
+        if "R_level" not in data.files:
+            raise KeyError(
+                f"{path} does not contain an 'R_level' array "
+                f"(keys: {list(data.files)})"
+            )
+        return Rot.from_matrix(np.asarray(data["R_level"], dtype=np.float64))
+    if require:
+        raise FileNotFoundError(
+            f"Missing gravity_align.npz at {path}. Re-run the gravity-aware "
+            "annotation tool, or pass require_gravity_align=False to fall back "
+            "to identity (development-only)."
+        )
+    warnings.warn(
+        f"gravity_align.npz not found at {path}; falling back to identity "
+        "R_level. This means training data will be un-levelled and box yaw "
+        "will absorb the sensor tilt. Use only for development.",
+        stacklevel=2,
+    )
+    return Rot.identity()
+
+
+def _load_t_rtk(calib_path: str, sensor: str, require: bool):
+    """Load per-sensor T_rtk from calibration.yml.
+
+    Returns (Rotation, translation_ndarray) or None when file is absent
+    and require=False.  RigidTransform is not used — scipy 1.15.2 lacks it.
+    """
+    import yaml
+
+    if os.path.isfile(calib_path):
+        with open(calib_path, "r") as f:
+            data = yaml.full_load(f)
+        sensors_data = data.get("T_rtk_sensors", {})
+        if sensor not in sensors_data:
+            raise KeyError(
+                f"{calib_path} has no entry for sensor '{sensor}' "
+                f"(available: {list(sensors_data.keys())})"
+            )
+        T = np.asarray(sensors_data[sensor]["matrix"], dtype=np.float64)
+        if T.shape != (4, 4):
+            raise ValueError(
+                f"{calib_path}[{sensor}]['matrix'] must be 4×4, got {T.shape}"
+            )
+        rotation = Rot.from_matrix(T[:3, :3])
+        translation = T[:3, 3]
+        return rotation, translation
+
+    if require:
+        raise FileNotFoundError(
+            f"Missing calibration.yml at {calib_path}. "
+            "Re-run calibration, or pass require_calibration=False to skip."
+        )
+    warnings.warn(
+        f"calibration.yml not found at {calib_path}; T_rtk will not be applied "
+        f"for sensor '{sensor}'. Points remain in sensor frame.",
+        stacklevel=2,
+    )
+    return None
+
+
+
+
+def _shift_scale_points(pts, src_range, dst_range):
+    scale = (dst_range[1] - dst_range[0]) / (src_range[1] - src_range[0] + 1e-6)
+    bias = dst_range[0] - src_range[0] * scale
+    return pts * scale + bias
+
+
+@DATASETS.register_module()
+class AgcoSegV1(Dataset):
+    """AGCO oriented-bbox detection dataset for 3DETR.
+
+    Args:
+        root_dir (str): directory containing annotation roots listed in the
+            split files.
+        meta_data_dir (str): directory containing `<split_prefix>_<split>.txt`.
+        split (str): 'train' or 'val'.
+        split_prefix (str): prefix of the split txt file. Default 'agco'.
+        sensors (list[str]): LiDAR folders to enumerate samples from, e.g.
+            ["lslidar"] or ["lslidar", "ouster"]. Each sensor contributes its
+            own samples; clouds are NOT fused across sensors.
+        num_points (int): points subsampled per scan. Enforced as a final
+            safety-net even if the ``transform`` pipeline doesn't include
+            ``PointSubsampleDetection``.
+        use_intensity (bool): if True, append per-point intensity as a 4th
+            channel when intensity .npy is present; otherwise zeros.
+        utonia_preprocess (bool): if True, right-pad ``point_clouds`` with
+            zero-channels so the per-point feature width is 9
+            ``[xyz, rgb=0, normal=0]``, matching the Utonia (PT-v3m3)
+            checkpoint's ``in_channels=9``. Padding happens after augmentation
+            and the safety-net subsample. Default False.
+        require_gravity_align (bool): if True (default), missing
+            `gravity_align.npz` raises; if False, falls back to identity with
+            a warning.
+        residual_rpy_warn_deg (float): warn when levelled box pitch/roll
+            magnitude exceeds this threshold (only checked when
+            `apply_r_level_to_boxes=True`).
+        loop (int): dataset-length multiplier (Pointcept convention).
+        dataset_config: ignored; present for symmetry with other detection
+            datasets that accept a config object. The config used by the
+            detector is supplied separately in the model config.
+        apply_r_level_to_points (bool): if True, rotate point cloud XYZ by
+            `R_level`. Default False — matches the visualizer flag default.
+        apply_r_level_to_boxes (bool): if True, rotate box centers and
+            compose box quaternions with `R_level`. Default False.
+        apply_t_rtk (bool): if True, apply per-sensor T_rtk calibration (sensor →
+            RTK/world frame) to point cloud XYZ before R_level. Default False.
+            When ``require_calibration=False`` and ``calibration.yml`` is missing,
+            the map entry is ``None`` and the transform is silently skipped for
+            that root/sensor.
+        require_calibration (bool): if True and calibration.yml is missing, raise;
+            if False (default), warn and skip T_rtk for that root/sensor.
+        apply_r_global (bool): if True, apply the pitch and roll components of the
+            per-timestamp global transform (`<sensor>/global_transforms/<ts>.npy`,
+            a 4×4 matrix) to both point cloud XYZ and box centers/orientations.
+            The 3×3 rotation is decomposed via ZYX Euler angles; yaw is discarded
+            so the scene retains its original horizontal heading. Translation is
+            ignored. Applied to points after T_rtk. Default False.
+    """
+
+    def __init__(
+        self,
+        root_dir,
+        meta_data_dir,
+        split="train",
+        split_prefix="agco",
+        sensors=("lslidar",),
+        num_points=80000,
+        use_intensity=False,
+        utonia_preprocess=False,
+        transform=None,
+        require_gravity_align=True,
+        residual_rpy_warn_deg=2.0,
+        loop=1,
+        dataset_config=None,
+        min_inliers=67,
+        apply_r_level_to_points=False,
+        apply_r_level_to_boxes=False,
+        apply_t_rtk: bool = False,
+        require_calibration: bool = False,
+        apply_r_global: bool = False,
+        deterministic_debug: bool = False,
+        deterministic_seed: int = 0,
+        debug_roundtrip_check: bool = False,
+    ):
+        assert split in ("train", "val", "test"), f"Unknown split: {split}"
+        assert len(sensors) > 0, "At least one sensor must be specified"
+        self.root_dir = root_dir
+        self.meta_data_dir = meta_data_dir
+        self.split = split
+        self.split_prefix = split_prefix
+        self.sensors = tuple(sensors)
+        self.num_points = int(num_points)
+        self.use_intensity = bool(use_intensity)
+        self.utonia_preprocess = bool(utonia_preprocess)
+        from .transform import Compose
+        self.transform = Compose(transform or [])
+        self.require_gravity_align = bool(require_gravity_align)
+        self.residual_rpy_warn_rad = np.deg2rad(float(residual_rpy_warn_deg))
+        self.loop = int(loop)
+        self.max_num_obj = 64
+        self.min_inliers = int(min_inliers)
+        self.apply_r_level_to_points = bool(apply_r_level_to_points)
+        self.apply_r_level_to_boxes = bool(apply_r_level_to_boxes)
+        self.apply_t_rtk = bool(apply_t_rtk)
+        self.require_calibration = bool(require_calibration)
+        self.apply_r_global = bool(apply_r_global)
+        self.deterministic_debug = bool(deterministic_debug)
+        self.deterministic_seed = int(deterministic_seed)
+        self.debug_roundtrip_check = bool(debug_roundtrip_check)
+        self.center_normalizing_range = [
+            np.zeros((1, 3), dtype=np.float32),
+            np.ones((1, 3), dtype=np.float32),
+        ]
+
+        split_file = os.path.join(meta_data_dir, f"{split_prefix}_{split}.txt")
+        with open(split_file, "r") as f:
+            roots = [line.strip() for line in f if line.strip()]
+
+        self.roots = []        # absolute paths
+        self.r_levels = []     # scipy Rotation, one per root
+        for r in roots:
+            abs_root = r if os.path.isabs(r) else os.path.join(root_dir, r)
+            if not os.path.isdir(abs_root):
+                raise FileNotFoundError(
+                    f"Annotation root does not exist: {abs_root}"
+                )
+            self.roots.append(abs_root)
+            self.r_levels.append(
+                _load_r_level(
+                    os.path.join(abs_root, "gravity_align.npz"),
+                    require=self.require_gravity_align,
+                )
+            )
+
+        # Build per-(root, sensor) T_rtk map. Loaded once; reused across samples.
+        self._t_rtk_map: dict = {}
+        if self.apply_t_rtk:
+            for ridx, abs_root in enumerate(self.roots):
+                calib_path = os.path.join(abs_root, "calibration.yml")
+                for sensor in self.sensors:
+                    result = _load_t_rtk(
+                        calib_path, sensor, require=self.require_calibration
+                    )
+                    self._t_rtk_map[(ridx, sensor)] = result
+
+        # Flatten (root_idx, sensor, ts) samples.
+        self.samples = []
+        for ridx, abs_root in enumerate(self.roots):
+            for sensor in self.sensors:
+                coord_dir = os.path.join(
+                    abs_root, sensor, "pointcloud_raw", "coord"
+                )
+                seg_dir = os.path.join(
+                    abs_root, sensor, "segment"
+                )
+
+                bbox_dir = os.path.join(abs_root, sensor, "annotations")
+                if not os.path.isdir(coord_dir) or not os.path.isdir(seg_dir):
+                    continue
+                # Enumerate annotations first, then verify the matching coord
+                # exists. Avoids silently skipping annotated samples when the
+                # coord dir contains extra timestamps.
+                timestamps = sorted(
+                    os.path.splitext(f)[0]
+                    for f in os.listdir(seg_dir)
+                    if f.endswith(".npy")
+                )
+                for ts in timestamps:
+                    if os.path.isfile(
+                        os.path.join(coord_dir, f"{ts}.npy")
+                    ):
+                        self.samples.append((ridx, sensor, ts))
+
+        print(
+            f"[AgcoSegV1] {split}: {len(self.samples)} samples across "
+            f"{len(self.roots)} roots, sensors={list(self.sensors)}"
+        )
+
+    def __len__(self):
+        return len(self.samples) * self.loop
+
+    # ------------------------------------------------------------------
+
+    # def _load_scan(self, abs_root, sensor, ts):
+    #     coord_path = os.path.join(
+    #         abs_root, sensor, "pointcloud_raw", "coord", f"{ts}.npy"
+    #     )
+    #     pts = np.load(coord_path).astype(np.float32)
+    #     if pts.ndim != 2 or pts.shape[1] < 3:
+    #         raise ValueError(
+    #             f"Unexpected point cloud shape {pts.shape} at {coord_path}"
+    #         )
+    #     pts = pts[:, :3]
+    #     if self.use_intensity:
+    #         intensity_path = os.path.join(
+    #             abs_root, sensor, "pointcloud_raw", "intensity", f"{ts}.npy"
+    #         )
+    #         if os.path.isfile(intensity_path):
+    #             intensity = np.load(intensity_path).astype(np.float32)
+    #             pts = np.concatenate([pts, intensity[:, None]], axis=1)
+    #         else:
+    #             pts = np.concatenate(
+    #                 [pts, np.zeros((pts.shape[0], 1), dtype=np.float32)], axis=1
+    #             )
+    #     print(f"pts ts: {ts}, pts shape {pts.shape}")
+    #
+    #     return pts
+
+    def _load_scan(self, data_dir, sensor, fname):
+        base = os.path.join(data_dir, sensor, "pointcloud_raw")
+        coord_path = os.path.join(base, "coord", fname+".npy")
+
+        pts = np.load(coord_path).astype(np.float32)
+
+        # Flatten if needed
+        if pts.ndim == 3:
+            pts = pts.reshape(-1, pts.shape[-1])
+        pts = pts[:, :3]
+
+        # --- Load fields exactly like annotation ---
+        fields = {}
+        for field_name in os.listdir(base):
+            fpath = os.path.join(base, field_name, fname + ".npy")
+            if os.path.isfile(fpath):
+                arr = np.load(fpath)
+
+                if arr.ndim > 1 and arr.shape[-1] == 1:
+                    arr = arr.reshape(-1)
+                elif arr.ndim > 1:
+                    arr = arr.reshape(-1, arr.shape[-1])
+                else:
+                    arr = arr.reshape(-1)
+
+                fields[field_name] = arr
+
+        # --- Apply SAME validity mask ---
+        if "t" in fields:
+            # Ouster-style filtering
+            valid = (np.any(pts != 0, axis=1)) & (fields["t"] > 0)
+        else:
+            # LiDAR fallback
+            norms = np.linalg.norm(pts, axis=1)
+            valid = norms > 0.01
+
+        pts = pts[valid]
+        fields = {k: v[valid] for k, v in fields.items()}
+
+        return pts
+
+    def _load_segment(self, abs_root, sensor, ts):
+        seg_path = os.path.join(
+            abs_root, sensor, "segment", f"{ts}.npy"
+        )
+        segment = np.load(seg_path).astype(np.int32)
+        
+        # print(f"segment ts: {ts}, segment shape {segment.shape}")
+
+        return segment
+
+
+    def __getitem__(self, idx):
+        ridx, sensor, ts = self.samples[idx % len(self.samples)]
+        abs_root = self.roots[ridx]
+        R = self.r_levels[ridx]
+
+        point_cloud = self._load_scan(abs_root, sensor, ts)
+
+        segment = self._load_segment(abs_root, sensor, ts)
+
+        assert len(segment) == len(point_cloud)
+
+        # --- Points: sensor → RTK frame (T_rtk, points only) ---
+        if self.apply_t_rtk:
+            t_rtk = self._t_rtk_map.get((ridx, sensor))
+            if t_rtk is not None:
+                t_rot, t_trans = t_rtk
+                point_cloud[:, 0:3] = (
+                    t_rot.apply(point_cloud[:, 0:3]) + t_trans
+                ).astype(np.float32)
+
+        # --- Points + boxes: RTK → global frame (R_global_mat rotation, per-timestamp) ---
+        R_global = None
+        if self.apply_r_global:
+            global_transform_path = os.path.join(
+                abs_root, sensor, "global_transforms", f"{ts}.npy"
+            )
+            R_global_mat = np.load(global_transform_path).astype(np.float64)
+            if R_global_mat.shape != (4, 4):
+                raise ValueError(
+                    f"Global transform at {global_transform_path} must be 4×4, "
+                    f"got {R_global_mat.shape}"
+                )
+            # Extract only pitch and roll; yaw (heading) is discarded so the
+            # scene stays in its original horizontal orientation.
+            _angles = Rot.from_matrix(R_global_mat[:3, :3]).as_euler("ZYX")
+            R_global = Rot.from_euler("ZYX", [0.0, _angles[1], _angles[2]])
+            point_cloud[:, 0:3] = R_global.apply(point_cloud[:, 0:3]).astype(
+                np.float32
+            )
+
+        # --- Points: global → levelled frame (R_level) ---
+        if self.apply_r_level_to_points:
+            point_cloud[:, 0:3] = R.apply(point_cloud[:, 0:3]).astype(np.float32)
+
+
+        # --- Augmentation pipeline (config-driven) ---
+        
+        data_dict = {
+            "coord": point_cloud,
+            "point_cloud": point_cloud,
+            "segment":segment
+        }
+
+        data_dict = self.transform(data_dict)
+        # point_cloud = data_dict["point_cloud"]
+        #
+        # # --- Safety-net subsample (idempotent if pipeline already did it) ---
+        # if point_cloud.shape[0] != self.num_points:
+        #     if self.deterministic_debug:
+        #         rng = np.random.default_rng(self.deterministic_seed + int(idx))
+        #         if point_cloud.shape[0] >= self.num_points:
+        #             choices = rng.choice(point_cloud.shape[0], self.num_points, replace=False)
+        #         else:
+        #             choices = rng.choice(point_cloud.shape[0], self.num_points, replace=True)
+        #         point_cloud = point_cloud[choices]
+        #     else:
+        #         point_cloud, _ = _random_sampling(point_cloud, self.num_points)
+        # point_cloud = point_cloud.astype(np.float32)
+        #
+        # # Pad to 9 feature channels for the Utonia (PT-v3m3) pre-encoder,
+        # # which was pretrained with in_channels=9 ([xyz, rgb, normal]).
+        # if self.utonia_preprocess:
+        #     n_pad = 9 - point_cloud.shape[1]
+        #     if n_pad < 0:
+        #         raise ValueError(
+        #             f"utonia_preprocess: point_cloud already has "
+        #             f"{point_cloud.shape[1]} channels (>9)."
+        #         )
+        #     if n_pad > 0:
+        #         point_cloud = np.concatenate(
+        #             [point_cloud, np.zeros((point_cloud.shape[0], n_pad), dtype=np.float32)],
+        #             axis=1,
+        #         )
+        #
+        #
+        # # Angle-bin encoding (SUN-RGBD-style, via AgcoBBoxConfig).
+        # from pointcept.models.detection_3detr.dataset_config import AgcoBBoxConfig
+        #
+        # cfg = AgcoBBoxConfig()  # cheap; no state
+        #
+        # # Normalized centers / sizes in the point-cloud bbox.
+        # point_cloud_dims_min = point_cloud[:, :3].min(axis=0).astype(np.float32)
+        # point_cloud_dims_max = point_cloud[:, :3].max(axis=0).astype(np.float32)
+        # mult_factor = point_cloud_dims_max - point_cloud_dims_min
+        #
+
+        return data_dict 
+        {
+            "point_clouds": point_cloud,
+            "coord":point_cloud,
+            "segment":segment,
+            "point_cloud_dims_min": point_cloud_dims_min,
+            "point_cloud_dims_max": point_cloud_dims_max,
+            "scan_idx": np.array(idx, dtype=np.int64),
+            "frame_id": "agco_lidar_canonical",
+            "frame_meta": {
+                "apply_t_rtk": self.apply_t_rtk,
+                "apply_r_global": self.apply_r_global,
+                "apply_r_level_to_points": self.apply_r_level_to_points,
+                "apply_r_level_to_boxes": self.apply_r_level_to_boxes,
+                "sensor": sensor,
+                "timestamp": ts,
+                "root": os.path.basename(abs_root),
+                "deterministic_debug": self.deterministic_debug,
+            },
+        }
