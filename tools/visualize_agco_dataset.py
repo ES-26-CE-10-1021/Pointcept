@@ -322,6 +322,7 @@ class DatasetViewer:
 
     def load_sample(self):
         print(f"[{self.current_idx + 1}/{self.max_idx}] Loading sample {self.current_idx}...", end=" ", flush=True)
+        
         try:
             sample = self.dataset[self.current_idx]
 
@@ -505,11 +506,15 @@ def main():
     transform = [dict(type="PointSubsampleDetection", num_points=args.num_points)]
     if args.augment:
         transform = [
-            dict(type="RandomFlipDetection", p_x=0.5, p_y=0.5),
+            # dict(type="RandomFlipDetection", p_x=0.5, p_y=0.5),
+            # dict(type="RandomRotateZDetection", angle_deg=(-5.0, 5.0)),
+            # dict(type="RandomScaleDetection", scale=(0.9, 1.1), apply_to_sizes=True),
+            dict(type="SphericalCropDetection", max_dist=60.0, min_dist=0.0),
+            dict(type="FovCropDetection", azimuth_deg=(-60.0, 60.0), crop_points=True),
+            dict(type="RandomFlipDetection", p_x=0.0, p_y=0.5),
             dict(type="RandomRotateZDetection", angle_deg=(-5.0, 5.0)),
-            dict(type="RandomScaleDetection", scale=(0.9, 1.1), apply_to_sizes=True),
-            dict(type="RandomJitterDetection", sigma=0.005, clip=0.02),
-            dict(type="RandomCuboidDetection", min_points=30000),
+            # dict(type="RandomJitterDetection", sigma=0.005, clip=0.02),
+            # dict(type="RandomCuboidDetection", min_points=30000),
             dict(type="PointSubsampleDetection", num_points=args.num_points),
         ]
 
