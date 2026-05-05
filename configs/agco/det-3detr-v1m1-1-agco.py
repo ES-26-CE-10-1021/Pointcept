@@ -1,53 +1,49 @@
 """
-3DETR on AGCO — v2: Utonia (PT-v3m3) pre-encoder with last-stage fine-tune.
+3DETR on AGCO — v1: PointNet++ SA pre-encoder + vanilla Transformer + spherical
+and ±60° FOV crops matching the lslidar's effective range and wedge.
 
-Mirrors configs/scannet/det-3detr-utonia-v5m1-0-scannet.py adapted to AgcoBBoxV1
-(oriented boxes, 5 classes, num_angle_bin=12, lslidar single-sensor) with the
-same spherical + ±60° FOV crops as configs/agco/det-3detr-v1m1-0-agco.py.
+Same model as configs/agco/det-3detr-v0m1-0-agco.py; only the augmentation
+pipeline changes:
+  - SphericalCropDetection: keep points and box-centers within 2..60 m of origin.
+  - FovCropDetection: keep points and boxes whose centers fall within the
+    lslidar's azimuth FOV of (-60, 60) degrees.
 
-Key choices:
-  - ``pre_encoder.pretrained = "utonia"``  (HF checkpoint auto-loaded by
-    PTv3m3PreEncoder; ``in_channels=9`` is locked to the checkpoint).
-  - ``utonia_preprocess=True`` on AgcoBBoxV1 right-pads point_clouds from
-    XYZ (3 ch) to 9 ch with zeros for the missing rgb / normal channels.
-  - ``freeze_backbone="enc_finetune"``: embedding + early encoder stages
-    frozen; the last encoder stage trains end-to-end with the 3DETR head.
-  - Gravity alignment enabled on all splits.
+Both crops are deterministic and applied on val/test as well, so the model
+sees the same observable region at train and eval time. Gravity alignment is
+enabled on all splits so the cropped wedge sits in a consistent gravity-leveled
+frame.
 
 Usage:
-    sh scripts/train.sh -d agco -c det-3detr-v2m1-0-agco -n 3detr_agco_v2_utonia -g 2
+    sh scripts/train.sh -d agco -c det-3detr-v1m1-0-agco -n 3detr_agco_v1 -g 2
 """
 
 _base_ = ["../_base_/default_runtime.py"]
 
 # ── Training ─────────────────────────────────────────────────────────────────
-batch_size = 2
+batch_size = 8
 num_worker = 16
 mix_prob = 0
 enable_amp = False
 find_unused_parameters = False
 clip_grad = 0.1
-gradient_accumulation_steps = 4
 
 num_semcls = 5
 num_angle_bin = 12
-
-# Utonia's deepest-stage output width (PT-v3m3 enc_channels[-1]).
-UTONIA_ENC_DIM = 576
 
 # ── Model ─────────────────────────────────────────────────────────────────────
 model = dict(
     type="Model3DETRDetector",
     pre_encoder=dict(
-        type="PTv3m3PreEncoder",
-        pretrained="utonia",
-        grid_size=0.05,  # outdoor LiDAR — coarser than ScanNet's 0.01
-        enc_mode=True,
-        freeze_backbone="enc_finetune",
+        type="PointnetSAPreEncoder",
+        npoint=2048,
+        radius=0.2,
+        nsample=64,
+        mlp_dims=[0, 64, 128, 256],
+        normalize_xyz=True,
     ),
     encoder=dict(
         type="VanillaTransformerEncoder3DETR",
-        encoder_dim=UTONIA_ENC_DIM,
+        encoder_dim=256,
         nhead=4,
         nlayers=3,
         ffn_dim=128,
@@ -63,12 +59,11 @@ model = dict(
         dropout=0.1,
     ),
     dataset_config=dict(type="AgcoBBoxConfig", num_angle_bin=num_angle_bin),
-    encoder_dim=UTONIA_ENC_DIM,
+    encoder_dim=256,
     decoder_dim=256,
     num_queries=128,
     position_embedding="fourier",
     mlp_dropout=0.3,
-    projection_norm="ln",
     criterion=dict(
         type="SetCriterion3DETR",
         matcher_cfg=dict(
@@ -99,10 +94,11 @@ optimizer = dict(type="AdamW", lr=5e-4, weight_decay=0.1)
 scheduler = dict(
     type="OneCycleLR",
     max_lr=[5e-4],
-    pct_start=0.05,
+    pct_start=0.10,
     anneal_strategy="cos",
     div_factor=500.0,
     final_div_factor=1.0,
+    cycle_momentum=False,
 )
 
 # ── Dataset ───────────────────────────────────────────────────────────────────
@@ -134,7 +130,6 @@ data = dict(
 
         sensors=sensors,
         use_intensity=False,
-        utonia_preprocess=True,
 
         num_points=num_points,
         min_inliers=min_inliers,
@@ -153,6 +148,9 @@ data = dict(
             *det_crop_transforms,
             dict(type="RandomFlipDetection", p_x=0.0, p_y=0.5),
             dict(type="RandomRotateZDetection", angle_deg=(-5.0, 5.0)),
+            # dict(type="RandomScaleDetection", scale=(0.9, 1.1), apply_to_sizes=True),
+            # dict(type="RandomJitterDetection", sigma=0.005, clip=0.02),
+            # dict(type="RandomCuboidDetection", min_points=30000),
             dict(type="PointSubsampleDetection", num_points=num_points),
         ],
     ),
@@ -162,12 +160,11 @@ data = dict(
         root_dir=data_root,
         meta_data_dir=meta_data_dir,
 
-        split="val",
+        split="train",
         split_prefix="agco",
 
         sensors=sensors,
         use_intensity=False,
-        utonia_preprocess=True,
 
         num_points=num_points,
         min_inliers=min_inliers,
@@ -193,12 +190,11 @@ data = dict(
         root_dir=data_root,
         meta_data_dir=meta_data_dir,
 
-        split="test",
+        split="train",
         split_prefix="agco",
 
         sensors=sensors,
         use_intensity=False,
-        utonia_preprocess=True,
 
         num_points=num_points,
         min_inliers=min_inliers,

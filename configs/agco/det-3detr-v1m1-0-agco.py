@@ -87,14 +87,14 @@ model = dict(
 )
 
 # ── Schedule ──────────────────────────────────────────────────────────────────
-epoch = 720
-eval_epoch = 20
+epoch = 100
+eval_epoch = 10
 
 optimizer = dict(type="AdamW", lr=5e-4, weight_decay=0.1)
 scheduler = dict(
     type="OneCycleLR",
     max_lr=[5e-4],
-    pct_start=0.0125,
+    pct_start=0.10,
     anneal_strategy="cos",
     div_factor=500.0,
     final_div_factor=1.0,
@@ -109,7 +109,7 @@ sensors = ["lslidar"]
 num_points = 100_000
 
 class_names = ["tractor", "harvester", "trailer", "car", "hopper",]
-min_inliers = 500
+min_inliers = 350
 
 # Shared deterministic crops (lslidar effective range + ±60° FOV wedge).
 det_crop_transforms = [
