@@ -35,7 +35,7 @@ clip_grad = 0.1
 # are dropped at dataset load time, so the model never sees them as targets and
 # any prediction that fires on them is penalised as background. Order defines
 # the model class indices (0..K-1).
-included_classes = ("tractor", "harvester", "trailer")
+included_classes = ("tractor", "harvester", "trailer", "car", "hopper")
 num_semcls = len(included_classes)
 num_angle_bin = 12
 
