@@ -1897,3 +1897,166 @@ class ObjDetTester(TesterBase):
     def collate_fn(batch):
         from torch.utils.data.dataloader import default_collate
         return default_collate(batch)
+
+
+@TESTERS.register_module()
+class CombinedSegDetTester(TesterBase):
+    """Multi-task tester: per-batch IoU accumulation + 3DETR AP25/AP50.
+
+    Pairs with ``MultiTask3DETRSegmentor``, which in eval mode returns
+    ``dict(seg_logits, outputs, aux_outputs)``. We feed the box outputs to
+    ``APCalculator.step_meter`` (mirroring ``ObjDetTester.test``) and the
+    seg logits into ``intersection_and_union_gpu`` (mirroring
+    ``SemSegEvaluator.eval``), then report both.
+
+    Config requirements:
+        ``num_semcls`` (int): detection class count.
+        ``class_names`` (list[str]): detection class names.
+        ``data.num_classes`` (int): semseg class count.
+        ``data.ignore_index`` (int): semseg ignore label.
+        ``data.names`` (list[str]): semseg class names (optional).
+    """
+
+    def __init__(self, cfg, model=None, test_loader=None, verbose=False):
+        super().__init__(cfg, model, test_loader, verbose)
+
+    def test(self):
+        from pointcept.models.detection_3detr.dataset_config import _setup_3detr_path
+        _setup_3detr_path()
+        from utils.ap_calculator import APCalculator, get_ap_config_dict
+
+        logger = get_root_logger()
+        logger.info(">>>>>>>>>>>>>>>> Start Multi-Task Evaluation >>>>>>>>>>>>>>>>")
+
+        # ── Detection AP setup. ────────────────────────────────────────────
+        num_semcls = getattr(self.cfg, "num_semcls", 18)
+        class_names = getattr(
+            self.cfg, "class_names", [str(i) for i in range(num_semcls)]
+        )
+        class2type_map = {i: name for i, name in enumerate(class_names)}
+
+        class _SemClsProxy:
+            def __init__(self, n):
+                self.num_semcls = n
+
+        ap_config_dict = get_ap_config_dict(
+            remove_empty_box=True,
+            use_3d_nms=True,
+            nms_iou=0.25,
+            cls_nms=True,
+            per_class_proposal=True,
+            conf_thresh=0.05,
+            dataset_config=_SemClsProxy(num_semcls),
+        )
+        ap_calculator = APCalculator(
+            dataset_config=_SemClsProxy(num_semcls),
+            ap_iou_thresh=[0.25, 0.5],
+            class2type_map=class2type_map,
+            ap_config_dict=ap_config_dict,
+        )
+
+        # ── Seg accumulators. ──────────────────────────────────────────────
+        seg_num_classes = self.cfg.data.num_classes
+        seg_ignore_index = self.cfg.data.ignore_index
+        seg_names = getattr(
+            self.cfg.data, "names", [str(i) for i in range(seg_num_classes)]
+        )
+        intersection_meter = AverageMeter()
+        union_meter = AverageMeter()
+        target_meter = AverageMeter()
+
+        self.model.eval()
+
+        for idx, batch in enumerate(self.test_loader):
+            for key in batch:
+                if isinstance(batch[key], torch.Tensor):
+                    batch[key] = batch[key].cuda(non_blocking=True)
+
+            with torch.no_grad():
+                outputs = self.model(batch)
+
+            ap_calculator.step_meter(outputs, batch)
+
+            seg_pred = outputs["seg_logits"].max(1)[1]
+            segment = batch["segment"].reshape(-1)
+            intersection, union, target = intersection_and_union_gpu(
+                seg_pred, segment, seg_num_classes, seg_ignore_index
+            )
+            if comm.get_world_size() > 1:
+                dist.all_reduce(intersection)
+                dist.all_reduce(union)
+                dist.all_reduce(target)
+            intersection_meter.update(intersection.cpu().numpy())
+            union_meter.update(union.cpu().numpy())
+            target_meter.update(target.cpu().numpy())
+
+            if (idx + 1) % 50 == 0 or (idx + 1) == len(self.test_loader):
+                logger.info(
+                    "Test: [{iter}/{max_iter}]".format(
+                        iter=idx + 1, max_iter=len(self.test_loader)
+                    )
+                )
+
+        # ── Aggregate detection across ranks. ──────────────────────────────
+        comm.synchronize()
+        all_pred = comm.gather(ap_calculator.pred_map_cls, dst=0)
+        all_gt = comm.gather(ap_calculator.gt_map_cls, dst=0)
+
+        # ── Aggregate seg IoU. ─────────────────────────────────────────────
+        intersection = intersection_meter.sum
+        union = union_meter.sum
+        target = target_meter.sum
+        iou_class = intersection / (union + 1e-10)
+        acc_class = intersection / (target + 1e-10)
+        m_iou = float(np.mean(iou_class))
+        m_acc = float(np.mean(acc_class))
+        all_acc = float(sum(intersection) / (sum(target) + 1e-10))
+
+        if comm.is_main_process():
+            merged_pred, merged_gt, scan_cnt = {}, {}, 0
+            for pred_dict, gt_dict in zip(all_pred, all_gt):
+                for local_id in sorted(pred_dict.keys()):
+                    merged_pred[scan_cnt] = pred_dict[local_id]
+                    merged_gt[scan_cnt] = gt_dict[local_id]
+                    scan_cnt += 1
+            ap_calculator.pred_map_cls = merged_pred
+            ap_calculator.gt_map_cls = merged_gt
+            metrics = ap_calculator.compute_metrics()
+            ap25 = metrics[0.25]["mAP"] * 100
+            ap50 = metrics[0.5]["mAP"] * 100
+
+            logger.info(
+                "Test result: AP25/AP50 {:.2f}/{:.2f}".format(ap25, ap50)
+            )
+            logger.info(
+                "Test result: mIoU/mAcc/allAcc {:.4f}/{:.4f}/{:.4f}".format(
+                    m_iou, m_acc, all_acc
+                )
+            )
+            for cls_id, name in enumerate(seg_names[:seg_num_classes]):
+                logger.info(
+                    "  seg[{:>2}] {:20s}: IoU={:.4f}  Acc={:.4f}".format(
+                        cls_id, name, float(iou_class[cls_id]),
+                        float(acc_class[cls_id]),
+                    )
+                )
+            for cls_name in class_names:
+                ap_key = "{} Average Precision".format(cls_name)
+                logger.info(
+                    "  det {:20s}: AP25={:.2f}  AP50={:.2f}".format(
+                        cls_name,
+                        metrics[0.25].get(ap_key, float("nan")) * 100,
+                        metrics[0.5].get(ap_key, float("nan")) * 100,
+                    )
+                )
+
+            logger.info(
+                "<<<<<<<<<<<<<<<<< End Multi-Task Evaluation <<<<<<<<<<<<<<<<<"
+            )
+
+        comm.synchronize()
+
+    @staticmethod
+    def collate_fn(batch):
+        from torch.utils.data.dataloader import default_collate
+        return default_collate(batch)
