@@ -1,83 +1,52 @@
 """
-3DETR on AGCO — v3: PTv3 pre-encoder + Identity encoder + Transformer decoder.
+3DETR on AGCO — v2m1-1-3cls: Overfitting config (train split on all splits).
 
-Mirrors configs/scannet/det-3detr-v2m1-0-scannet.py (PTv3PreEncoder feeding an
-IdentityEncoder3DETR, with the cross-attention TransformerDecoder3DETR for box
-queries) adapted to AgcoBBoxV1:
-  - 5 classes, oriented boxes via AgcoBBoxConfig (num_angle_bin=12).
-  - num_queries=128 (fewer objects per scan than ScanNet indoor scenes).
-  - PTv3 grid_size=0.05 — outdoor LiDAR is much sparser than ScanNet's indoor
-    voxelization (0.02).
-
-Augmentation pipeline matches configs/agco/det-3detr-v1m1-0-agco.py:
-  - SphericalCropDetection (max 60 m) + FovCropDetection (±60° azimuth) on all
-    splits, so train/val/test see the same observable wedge.
-  - RandomFlipDetection(p_y=0.5) + RandomRotateZDetection(±5°) on train only.
-  - PointSubsampleDetection enforces num_points as the final step.
-
-Gravity alignment is enabled on all splits.
+Identical to configs/agco/det-3detr-v2m1-1-agco.py except `included_classes` is reduced
+to 3 (discards car and hopper). Uses train split for val/test to overfit on training data.
 
 Usage:
-    sh scripts/train.sh -d agco -c det-3detr-v3m1-0-agco -n 3detr_agco_v3 -g 2
+    sh scripts/train.sh -d agco -c det-3detr-v2m1-1-3cls-agco -n 3detr_agco_v2_3cls_overfit -g 2
 """
 
 _base_ = ["../_base_/default_runtime.py"]
 
 # ── Training ─────────────────────────────────────────────────────────────────
-batch_size = 4       # PTv3 + 100k pts is heavier than v1; use grad accum for batch_size=8 effective
+batch_size = 2
 num_worker = 16
 mix_prob = 0
 enable_amp = False
 find_unused_parameters = False
 clip_grad = 0.1
-gradient_accumulation_steps = 2
+gradient_accumulation_steps = 4
 
-# Subset of AGCO classes to train/eval on. Boxes for any class not listed here
-# are dropped at dataset load time, so the model never sees them as targets and
-# any prediction that fires on them is penalised as background. Order defines
-# the model class indices (0..K-1).
-included_classes = ("tractor", "harvester", "trailer", "car", "hopper")
+# Subset of AGCO classes to train/eval on: only 3 classes (no car, no hopper).
+# Order defines the model class indices (0..K-1).
+included_classes = ("tractor", "harvester", "trailer")
 num_semcls = len(included_classes)
 num_angle_bin = 12
+
+# Utonia's deepest-stage output width (PT-v3m3 enc_channels[-1]).
+UTONIA_ENC_DIM = 576
 
 # ── Model ─────────────────────────────────────────────────────────────────────
 model = dict(
     type="Model3DETRDetector",
-    # PTv3 Encoder (mirrors scannet v2m1-0; grid_size bumped for outdoor LiDAR)
     pre_encoder=dict(
-        type="PTv3PreEncoder",
-        grid_size=0.05,
-        in_channels=3,
-        order=("z", "z-trans", "hilbert", "hilbert-trans"),
-        stride=(2, 2, 2, 2),
-        enc_depths=(2, 2, 2, 6, 2),
-        enc_channels=(32, 64, 128, 256, 512),
-        enc_num_head=(2, 4, 8, 16, 32),
-        enc_patch_size=(1024, 1024, 1024, 1024, 1024),
-        mlp_ratio=4,
-        qkv_bias=True,
-        qk_scale=None,
-        attn_drop=0.0,
-        proj_drop=0.0,
-        drop_path=0.3,
-        shuffle_orders=True,
-        pre_norm=True,
-        enable_rpe=False,
-        enable_flash=True,
-        upcast_attention=False,
-        upcast_softmax=False,
-        pdnorm_bn=False,
-        pdnorm_ln=False,
-        pdnorm_decouple=True,
-        pdnorm_adaptive=False,
-        pdnorm_affine=True,
-        pdnorm_conditions=("ScanNet", "S3DIS", "Structured3D"),
+        type="PTv3m3PreEncoder",
+        pretrained="utonia",
+        grid_size=0.05,  # outdoor LiDAR — coarser than ScanNet's 0.01
+        enc_mode=True,
+        freeze_backbone="enc_finetune",
     ),
-    # Identity mapping (placeholder for skipping the secondary encoder)
     encoder=dict(
-        type="IdentityEncoder3DETR",
+        type="VanillaTransformerEncoder3DETR",
+        encoder_dim=UTONIA_ENC_DIM,
+        nhead=4,
+        nlayers=3,
+        ffn_dim=128,
+        dropout=0.1,
+        activation="relu",
     ),
-    # Cross-attention decoder for box queries
     decoder=dict(
         type="TransformerDecoder3DETR",
         decoder_dim=256,
@@ -91,7 +60,7 @@ model = dict(
         num_angle_bin=num_angle_bin,
         included_classes=included_classes,
     ),
-    encoder_dim=512,    # must match enc_channels[-1]; encoder_to_decoder_projection handles 512->256
+    encoder_dim=UTONIA_ENC_DIM,
     decoder_dim=256,
     num_queries=128,
     position_embedding="fourier",
@@ -127,11 +96,10 @@ optimizer = dict(type="AdamW", lr=5e-4, weight_decay=0.1)
 scheduler = dict(
     type="OneCycleLR",
     max_lr=[5e-4],
-    pct_start=0.10,
+    pct_start=0.05,
     anneal_strategy="cos",
     div_factor=500.0,
     final_div_factor=1.0,
-    cycle_momentum=False,
 )
 
 # ── Dataset ───────────────────────────────────────────────────────────────────
@@ -163,6 +131,7 @@ data = dict(
 
         sensors=sensors,
         use_intensity=False,
+        utonia_preprocess=True,
 
         num_points=num_points,
         min_inliers=min_inliers,
@@ -191,11 +160,12 @@ data = dict(
         root_dir=data_root,
         meta_data_dir=meta_data_dir,
 
-        split="val",
+        split="train",
         split_prefix="agco",
 
         sensors=sensors,
         use_intensity=False,
+        utonia_preprocess=True,
 
         num_points=num_points,
         min_inliers=min_inliers,
@@ -222,11 +192,12 @@ data = dict(
         root_dir=data_root,
         meta_data_dir=meta_data_dir,
 
-        split="test",
+        split="train",
         split_prefix="agco",
 
         sensors=sensors,
         use_intensity=False,
+        utonia_preprocess=True,
 
         num_points=num_points,
         min_inliers=min_inliers,

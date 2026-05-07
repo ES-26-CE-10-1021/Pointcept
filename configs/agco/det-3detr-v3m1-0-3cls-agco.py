@@ -1,24 +1,12 @@
 """
-3DETR on AGCO — v3: PTv3 pre-encoder + Identity encoder + Transformer decoder.
+3DETR on AGCO — v3m1-0-3cls: PTv3 pre-encoder + Identity encoder + Transformer decoder,
+with only 3 classes: tractor, harvester, trailer.
 
-Mirrors configs/scannet/det-3detr-v2m1-0-scannet.py (PTv3PreEncoder feeding an
-IdentityEncoder3DETR, with the cross-attention TransformerDecoder3DETR for box
-queries) adapted to AgcoBBoxV1:
-  - 5 classes, oriented boxes via AgcoBBoxConfig (num_angle_bin=12).
-  - num_queries=128 (fewer objects per scan than ScanNet indoor scenes).
-  - PTv3 grid_size=0.05 — outdoor LiDAR is much sparser than ScanNet's indoor
-    voxelization (0.02).
-
-Augmentation pipeline matches configs/agco/det-3detr-v1m1-0-agco.py:
-  - SphericalCropDetection (max 60 m) + FovCropDetection (±60° azimuth) on all
-    splits, so train/val/test see the same observable wedge.
-  - RandomFlipDetection(p_y=0.5) + RandomRotateZDetection(±5°) on train only.
-  - PointSubsampleDetection enforces num_points as the final step.
-
-Gravity alignment is enabled on all splits.
+Identical to configs/agco/det-3detr-v3m1-0-agco.py except `included_classes` is reduced
+to 3 (discards car and hopper). Boxes for excluded classes are dropped at dataset load time.
 
 Usage:
-    sh scripts/train.sh -d agco -c det-3detr-v3m1-0-agco -n 3detr_agco_v3 -g 2
+    sh scripts/train.sh -d agco -c det-3detr-v3m1-0-3cls-agco -n 3detr_agco_v3_3cls -g 2
 """
 
 _base_ = ["../_base_/default_runtime.py"]
@@ -32,11 +20,9 @@ find_unused_parameters = False
 clip_grad = 0.1
 gradient_accumulation_steps = 2
 
-# Subset of AGCO classes to train/eval on. Boxes for any class not listed here
-# are dropped at dataset load time, so the model never sees them as targets and
-# any prediction that fires on them is penalised as background. Order defines
-# the model class indices (0..K-1).
-included_classes = ("tractor", "harvester", "trailer", "car", "hopper")
+# Subset of AGCO classes to train/eval on: only 3 classes (no car, no hopper).
+# Order defines the model class indices (0..K-1).
+included_classes = ("tractor", "harvester", "trailer")
 num_semcls = len(included_classes)
 num_angle_bin = 12
 
