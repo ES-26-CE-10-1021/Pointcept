@@ -4,7 +4,9 @@
 Mirrors configs/scannet/det-3detr-v2m1-0-scannet.py (PTv3PreEncoder feeding an
 IdentityEncoder3DETR, with the cross-attention TransformerDecoder3DETR for box
 queries) adapted to AgcoBBoxV1:
-  - 5 classes, oriented boxes via AgcoBBoxConfig (num_angle_bin=12).
+  - Class set is configurable via `included_classes` (default: all 5 —
+    tractor, harvester, trailer, car, hopper); oriented boxes via
+    AgcoBBoxConfig (num_angle_bin=12).
   - num_queries=128 (fewer objects per scan than ScanNet indoor scenes).
   - PTv3 grid_size=0.05 — outdoor LiDAR is much sparser than ScanNet's indoor
     voxelization (0.02).
@@ -31,7 +33,12 @@ enable_amp = False
 find_unused_parameters = False
 clip_grad = 0.1
 
-num_semcls = 5
+# Subset of AGCO classes to train/eval on. Boxes for any class not listed here
+# are dropped at dataset load time, so the model never sees them as targets and
+# any prediction that fires on them is penalised as background. Order defines
+# the model class indices (0..K-1).
+included_classes = ("tractor", "harvester", "trailer", "car", "hopper")
+num_semcls = len(included_classes)
 num_angle_bin = 12
 
 # ── Model ─────────────────────────────────────────────────────────────────────
@@ -80,7 +87,11 @@ model = dict(
         ffn_dim=256,
         dropout=0.1,
     ),
-    dataset_config=dict(type="AgcoBBoxConfig", num_angle_bin=num_angle_bin),
+    dataset_config=dict(
+        type="AgcoBBoxConfig",
+        num_angle_bin=num_angle_bin,
+        included_classes=included_classes,
+    ),
     encoder_dim=512,    # must match enc_channels[-1]; encoder_to_decoder_projection handles 512->256
     decoder_dim=256,
     num_queries=128,
@@ -131,7 +142,7 @@ meta_data_dir = "/mnt/data/pointcloud_datasets/Pointcept/agco2026/meta_data"
 sensors = ["lslidar"]
 num_points = 100_000
 
-class_names = ["tractor", "harvester", "trailer", "car", "hopper",]
+class_names = list(included_classes)
 min_inliers = 350
 
 # Shared deterministic crops (lslidar effective range + ±60° FOV wedge).
@@ -156,6 +167,7 @@ data = dict(
 
         num_points=num_points,
         min_inliers=min_inliers,
+        included_classes=included_classes,
 
         apply_t_rtk=True,
         require_calibration=True,
@@ -188,6 +200,7 @@ data = dict(
 
         num_points=num_points,
         min_inliers=min_inliers,
+        included_classes=included_classes,
 
         apply_t_rtk=True,
         require_calibration=True,
@@ -218,6 +231,7 @@ data = dict(
 
         num_points=num_points,
         min_inliers=min_inliers,
+        included_classes=included_classes,
 
         apply_t_rtk=True,
         require_calibration=True,
