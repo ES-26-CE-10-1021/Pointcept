@@ -156,27 +156,35 @@ class AgcoBBoxConfig:
         4: car
         5: hopper
 
-    Model class indices (after remapping by AgcoBBoxV1._load_boxes):
-        0: tractor
-        1: harvester
-        2: trailer
-        3: car
-        4: hopper
+    Model class indices are derived from `included_classes` (default: all
+    five — `("tractor", "harvester", "trailer", "car", "hopper")` →
+    0..4 in that order). When `included_classes` is a subset, the kept
+    names are reassigned 0..K-1 in the order given; pass the same tuple to
+    `AgcoBBoxV1` so the dataset's disk-label remap matches.
     """
 
-    def __init__(self, num_angle_bin: int = 12):
+    _ALL_CLASSES = ("tractor", "harvester", "trailer", "car", "hopper")
+
+    def __init__(self, num_angle_bin: int = 12, included_classes=None):
         self.num_angle_bin = int(num_angle_bin)
         self.max_num_obj = 64
 
-        self.type2class = {
-            "tractor": 0,
-            "harvester": 1,
-            "trailer": 2,
-            "car": 3,
-            "hopper": 4,
-        }
+        included = tuple(
+            included_classes if included_classes is not None else self._ALL_CLASSES
+        )
+        unknown = [n for n in included if n not in self._ALL_CLASSES]
+        if unknown:
+            raise ValueError(
+                f"Unknown class names in included_classes: {unknown}. "
+                f"Valid names: {list(self._ALL_CLASSES)}"
+            )
+        if len(set(included)) != len(included):
+            raise ValueError(f"Duplicate entries in included_classes: {included}")
+
+        self.included_classes = included
+        self.type2class = {name: i for i, name in enumerate(included)}
         self.class2type = {v: k for k, v in self.type2class.items()}
-        self.num_semcls = len(self.type2class.keys())
+        self.num_semcls = len(self.type2class)
 
     # -- angle encoding (SUN-RGBD-style) --------------------------------------
 

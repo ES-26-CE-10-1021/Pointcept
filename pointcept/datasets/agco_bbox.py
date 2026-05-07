@@ -58,11 +58,39 @@ from .scannet_detection import (
     _random_sampling,
 )
 
-# Mapping from disk label (upstream annotation tool) to model class index.
-# Background (disk label 0) is excluded; entries not in this dict are dropped.
-# Disk scheme: 0=background, 1=tractor, 2=harvester, 3=trailer, 4=car, 5=hopper
-# Model scheme: 0=hopper, 1=tractor, 2=harvester, 3=trailer, 4=car
-_DISK_LABEL_TO_CLASS = {1: 0, 2: 1, 3: 2, 4: 3, 5: 4}
+# Canonical disk label scheme (upstream annotation tool):
+#   0=background (excluded), 1=tractor, 2=harvester, 3=trailer, 4=car, 5=hopper
+_NAME_TO_DISK_LABEL = {
+    "tractor": 1,
+    "harvester": 2,
+    "trailer": 3,
+    "car": 4,
+    "hopper": 5,
+}
+
+# Default model class order (matches AgcoBBoxConfig default).
+_DEFAULT_INCLUDED_CLASSES = ("tractor", "harvester", "trailer", "car", "hopper")
+
+
+def _build_disk_label_to_class(included_classes):
+    """Build {disk_label: model_class_idx} from an ordered name tuple.
+
+    Model class indices are assigned 0..K-1 in the order given by
+    `included_classes`. Names not in the tuple are dropped at load time.
+    """
+    unknown = [n for n in included_classes if n not in _NAME_TO_DISK_LABEL]
+    if unknown:
+        raise ValueError(
+            f"Unknown class names in included_classes: {unknown}. "
+            f"Valid names: {sorted(_NAME_TO_DISK_LABEL.keys())}"
+        )
+    if len(set(included_classes)) != len(included_classes):
+        raise ValueError(
+            f"Duplicate entries in included_classes: {included_classes}"
+        )
+    return {
+        _NAME_TO_DISK_LABEL[name]: i for i, name in enumerate(included_classes)
+    }
 
 
 def _load_r_level(path, require: bool):
@@ -189,8 +217,20 @@ class AgcoBBoxV1(Dataset):
         dataset_config: ignored; present for symmetry with other detection
             datasets that accept a config object. The config used by the
             detector is supplied separately in the model config.
-        min_inliers (int): minimum `inliers` count for a parent bbox to be
-            kept. Children inherit visibility from their parent.
+        min_inliers (int | dict[str, int]): minimum `inliers` count for a parent
+            bbox to be kept. Children inherit visibility from their parent.
+            Pass an ``int`` for a single global threshold, or a
+            ``{sensor: int}`` dict to use a different threshold per sensor;
+            when a dict is passed it must contain an entry for every sensor in
+            ``sensors``.
+        included_classes (tuple[str] | None): ordered subset of class names to
+            train/eval on. Boxes for any class not listed here are dropped at
+            load time, and the kept names are remapped to model class indices
+            ``0..K-1`` in the order given. ``None`` (default) keeps all five
+            classes in the canonical order
+            ``("tractor", "harvester", "trailer", "car", "hopper")``. When
+            customising, pass the same tuple to ``AgcoBBoxConfig`` so the
+            detector head's ``num_semcls`` and ``type2class`` agree.
         apply_r_level_to_points (bool): if True, rotate point cloud XYZ by
             `R_level`. Default False — matches the visualizer flag default.
         apply_r_level_to_boxes (bool): if True, rotate box centers and
@@ -226,6 +266,7 @@ class AgcoBBoxV1(Dataset):
         loop=1,
         dataset_config=None,
         min_inliers=67,
+        included_classes=None,
         apply_r_level_to_points=False,
         apply_r_level_to_boxes=False,
         apply_t_rtk: bool = False,
@@ -251,7 +292,19 @@ class AgcoBBoxV1(Dataset):
         self.residual_rpy_warn_rad = np.deg2rad(float(residual_rpy_warn_deg))
         self.loop = int(loop)
         self.max_num_obj = 64
-        self.min_inliers = int(min_inliers)
+        if isinstance(min_inliers, dict):
+            missing = set(self.sensors) - set(min_inliers.keys())
+            assert not missing, (
+                f"min_inliers dict is missing entries for sensors: {sorted(missing)}"
+            )
+            self.min_inliers = {s: int(min_inliers[s]) for s in self.sensors}
+        else:
+            self.min_inliers = int(min_inliers)
+        self.included_classes = tuple(
+            included_classes if included_classes is not None
+            else _DEFAULT_INCLUDED_CLASSES
+        )
+        self.disk_label_to_class = _build_disk_label_to_class(self.included_classes)
         self.apply_r_level_to_points = bool(apply_r_level_to_points)
         self.apply_r_level_to_boxes = bool(apply_r_level_to_boxes)
         self.apply_t_rtk = bool(apply_t_rtk)
@@ -359,16 +412,23 @@ class AgcoBBoxV1(Dataset):
             data = json.load(f)
         raw = data.get("annotations", [])
 
+        threshold = (
+            self.min_inliers[sensor]
+            if isinstance(self.min_inliers, dict)
+            else self.min_inliers
+        )
+
         # Keep parents that are visible AND have enough inliers; children
         # inherit the parent's visibility.
         filtered = []
         for b in raw:
-            if b.get("is_visible", True) and b.get("inliers", 0) >= self.min_inliers:
+            if b.get("is_visible", True) and b.get("inliers", 0) >= threshold:
                 filtered.append(b)
                 filtered.extend(b.get("children", []))
 
-        # Remap disk labels to model class indices; drop background (disk 0) and any unrecognised labels.
-        filtered = [b for b in filtered if int(b.get("label", -1)) in _DISK_LABEL_TO_CLASS]
+        # Remap disk labels to model class indices; drop background (disk 0),
+        # any unrecognised labels, and any classes not in `included_classes`.
+        filtered = [b for b in filtered if int(b.get("label", -1)) in self.disk_label_to_class]
 
         n = len(filtered)
         centers = np.zeros((n, 3), dtype=np.float64)
@@ -379,7 +439,7 @@ class AgcoBBoxV1(Dataset):
             centers[i] = b.get("translation")
             sizes[i] = b.get("dimensions")
             quats[i] = b.get("rotation")
-            labels[i] = _DISK_LABEL_TO_CLASS[int(b["label"])]
+            labels[i] = self.disk_label_to_class[int(b["label"])]
         return centers, sizes, quats, labels
 
     def __getitem__(self, idx):
@@ -461,6 +521,7 @@ class AgcoBBoxV1(Dataset):
             "gt_box_sizes_raw": sizes_raw,
             "gt_box_angles_raw": yaws_raw,
             "gt_box_labels_raw": labels_raw,
+            "sensor": sensor,
         }
         data_dict = self.transform(data_dict)
         point_cloud = data_dict["point_cloud"]

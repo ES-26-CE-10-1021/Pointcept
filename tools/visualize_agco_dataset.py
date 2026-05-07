@@ -227,6 +227,33 @@ def build_geometries_for_prediction(record, pts, score_thresh=0.0):
     return geometries
 
 
+class PerSensorSubset:
+    """Index-mapping wrapper that keeps the first ``num_per_sensor`` samples
+    per sensor from an ``AgcoBBoxV1`` dataset.
+
+    Reads ``dataset.samples`` (list of ``(root_idx, sensor, timestamp)``) to
+    decide which indices to surface. Forwards ``__getitem__`` to the underlying
+    dataset, so the viewer receives the same dict and `loop` semantics.
+    """
+
+    def __init__(self, dataset, num_per_sensor):
+        from collections import defaultdict
+        counts = defaultdict(int)
+        self.indices = []
+        for i, (_ridx, sensor, _ts) in enumerate(dataset.samples):
+            if counts[sensor] < num_per_sensor:
+                self.indices.append(i)
+                counts[sensor] += 1
+        self.dataset = dataset
+        self.counts = dict(counts)
+
+    def __len__(self):
+        return len(self.indices)
+
+    def __getitem__(self, idx):
+        return self.dataset[self.indices[idx]]
+
+
 class PredictionDataset:
     """Wraps a predictions directory to load saved test results."""
     def __init__(self, predictions_dir, score_thresh=0.0):
@@ -475,8 +502,8 @@ def main():
     parser.add_argument("--apply-t-rtk", action="store_true")
     parser.add_argument("--apply-r-global", action="store_true",
                         help="Apply per-timestamp global rotation to point cloud XYZ")
-    parser.add_argument("--sensor", default="lslidar")
-    parser.add_argument("--min-inliers", type=int, default=200)
+    #parser.add_argument("--sensor", default=["lslidar", "ouster", "rslidar"])
+    parser.add_argument("--min-inliers", default=dict(lslidar=400, ouster=200, rslidar=80))
     parser.add_argument("--apply-gravity-boxes", action="store_true")
     parser.add_argument("--apply-gravity-pts", action="store_true")
     parser.add_argument("--color-pts", action="store_true", help="Color points inside bounding boxes")
@@ -506,15 +533,39 @@ def main():
     transform = [dict(type="PointSubsampleDetection", num_points=args.num_points)]
     if args.augment:
         transform = [
-            # dict(type="RandomFlipDetection", p_x=0.5, p_y=0.5),
+            dict(
+                type="FovCropDetection",
+                azimuth_deg=(-60, 60),
+                elevation_deg=None,
+                crop_points=True,
+                per_sensor={
+                    "lslidar": dict(azimuth_deg=(-60, 60)),
+                    #"ouster":  dict(azimuth_deg=(-180, 180)),
+                    #"rslidar": dict(azimuth_deg=(-20, 20)),
+                },
+            ),
+            dict(
+                type="SphericalCropDetection", 
+                max_dist=60.0, 
+                min_dist=1.0,
+                per_sensor={
+                    "lslidar": dict(max_dist=60.0),
+                    "ouster":  dict(max_dist=40.0),
+                    "rslidar": dict(max_dist=20.0),
+                },
+            ),
+            dict(type="RandomJitterDetection", sigma=0.005, clip=0.02),
+            
+            # dict(type="SphericalCropDetection", max_dist=60.0, min_dist=0.0),
+            # dict(type="FovCropDetection", azimuth_deg=(-60.0, 60.0), crop_points=True),
+            
+            # dict(type="RandomFlipDetection", p_x=0.0, p_y=0.5),
             # dict(type="RandomRotateZDetection", angle_deg=(-5.0, 5.0)),
+            
             # dict(type="RandomScaleDetection", scale=(0.9, 1.1), apply_to_sizes=True),
-            dict(type="SphericalCropDetection", max_dist=60.0, min_dist=0.0),
-            dict(type="FovCropDetection", azimuth_deg=(-60.0, 60.0), crop_points=True),
-            dict(type="RandomFlipDetection", p_x=0.0, p_y=0.5),
-            dict(type="RandomRotateZDetection", angle_deg=(-5.0, 5.0)),
             # dict(type="RandomJitterDetection", sigma=0.005, clip=0.02),
             # dict(type="RandomCuboidDetection", min_points=30000),
+            
             dict(type="PointSubsampleDetection", num_points=args.num_points),
         ]
 
@@ -548,11 +599,23 @@ def main():
 
     print(f"Dataset: {len(dataset)} samples")
 
+    # When --num-samples is set, interpret it as "first N per sensor" so that
+    # multi-sensor runs surface samples from every sensor instead of slicing
+    # contiguously into the (root × sensor × timestamp) flatten order.
+    viewer_max_samples = args.num_samples
+    if args.num_samples is not None:
+        dataset = PerSensorSubset(dataset, num_per_sensor=args.num_samples)
+        print(
+            f"Per-sensor subset: {len(dataset)} samples total "
+            f"({dataset.counts})"
+        )
+        viewer_max_samples = None
+
     # Delegate viewing to the stateful Viewer class
     viewer = DatasetViewer(
         dataset=dataset,
         start_idx=args.start_idx,
-        max_samples=args.num_samples,
+        max_samples=viewer_max_samples,
         color_pts=args.color_pts
     )
     viewer.run()
