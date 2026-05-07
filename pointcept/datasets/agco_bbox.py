@@ -275,6 +275,8 @@ class AgcoBBoxV1(Dataset):
         deterministic_debug: bool = False,
         deterministic_seed: int = 0,
         debug_roundtrip_check: bool = False,
+        load_segment: bool = False,
+        segment_subdir: str = "segment",
     ):
         assert split in ("train", "val", "test"), f"Unknown split: {split}"
         assert len(sensors) > 0, "At least one sensor must be specified"
@@ -313,6 +315,8 @@ class AgcoBBoxV1(Dataset):
         self.deterministic_debug = bool(deterministic_debug)
         self.deterministic_seed = int(deterministic_seed)
         self.debug_roundtrip_check = bool(debug_roundtrip_check)
+        self.load_segment = bool(load_segment)
+        self.segment_subdir = str(segment_subdir)
         self.center_normalizing_range = [
             np.zeros((1, 3), dtype=np.float32),
             np.ones((1, 3), dtype=np.float32),
@@ -448,6 +452,22 @@ class AgcoBBoxV1(Dataset):
         R = self.r_levels[ridx]
 
         point_cloud = self._load_scan(abs_root, sensor, ts)
+        segment = None
+        if self.load_segment:
+            seg_path = os.path.join(
+                abs_root, sensor, self.segment_subdir, f"{ts}.npy"
+            )
+            if not os.path.exists(seg_path):
+                raise FileNotFoundError(
+                    f"AgcoBBoxV1.load_segment=True but segment file is missing: "
+                    f"{seg_path}"
+                )
+            segment = np.load(seg_path).astype(np.int64)
+            if segment.shape[0] != point_cloud.shape[0]:
+                raise ValueError(
+                    f"Segment label count ({segment.shape[0]}) does not match "
+                    f"point count ({point_cloud.shape[0]}) for {seg_path}."
+                )
         centers_raw, sizes_raw, quats_xyzw, labels_raw = self._load_boxes(
             abs_root, sensor, ts
         )
@@ -523,8 +543,11 @@ class AgcoBBoxV1(Dataset):
             "gt_box_labels_raw": labels_raw,
             "sensor": sensor,
         }
+        if segment is not None:
+            data_dict["segment"] = segment
         data_dict = self.transform(data_dict)
         point_cloud = data_dict["point_cloud"]
+        segment = data_dict.get("segment")  # None when load_segment is False
         centers_raw = data_dict["gt_box_centers_raw"]
         sizes_raw = data_dict["gt_box_sizes_raw"]
         yaws_raw = data_dict["gt_box_angles_raw"]
@@ -540,7 +563,9 @@ class AgcoBBoxV1(Dataset):
                     choices = rng.choice(point_cloud.shape[0], self.num_points, replace=True)
                 point_cloud = point_cloud[choices]
             else:
-                point_cloud, _ = _random_sampling(point_cloud, self.num_points)
+                point_cloud, choices = _random_sampling(point_cloud, self.num_points)
+            if segment is not None:
+                segment = segment[choices]
         point_cloud = point_cloud.astype(np.float32)
 
         # Pad to 9 feature channels for the Utonia (PT-v3m3) pre-encoder,
@@ -626,7 +651,7 @@ class AgcoBBoxV1(Dataset):
             roundtrip_diag["center_l2_mean"] = float(np.mean(center_err))
             roundtrip_diag["center_l2_max"] = float(np.max(center_err))
 
-        return {
+        out = {
             "point_clouds": point_cloud,
             "point_cloud_dims_min": point_cloud_dims_min,
             "point_cloud_dims_max": point_cloud_dims_max,
@@ -654,3 +679,6 @@ class AgcoBBoxV1(Dataset):
             },
             "roundtrip_diag": roundtrip_diag,
         }
+        if segment is not None:
+            out["segment"] = segment.astype(np.int64)
+        return out

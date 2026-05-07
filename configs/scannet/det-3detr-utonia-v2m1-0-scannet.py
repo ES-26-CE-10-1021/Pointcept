@@ -122,9 +122,14 @@ data = dict(
         num_points=40000,
         use_color=False,
         use_height=False,
-        augment=True,
-        random_cuboid_min_points=30000,
         utonia_preprocess=True,
+        transform=[
+            dict(type="RandomCuboidDetection", min_points=30000),
+            dict(type="GridSampleDetection", grid_size=0.01),
+            dict(type="PointSubsampleDetection", num_points=40000),
+            dict(type="RandomFlipDetection", p_x=0.5, p_y=0.5),
+            dict(type="RandomRotateZDetection", angle_deg=(-5.0, 5.0)),
+        ],
     ),
     val=dict(
         type=dataset_type,
@@ -134,8 +139,11 @@ data = dict(
         num_points=40000,
         use_color=False,
         use_height=False,
-        augment=False,
         utonia_preprocess=True,
+        transform=[
+            dict(type="GridSampleDetection", grid_size=0.01),
+            dict(type="PointSubsampleDetection", num_points=40000),
+        ],
     ),
     test=dict(
         type=dataset_type,
@@ -145,8 +153,11 @@ data = dict(
         num_points=40000,
         use_color=False,
         use_height=False,
-        augment=False,
         utonia_preprocess=True,
+        transform=[
+            dict(type="GridSampleDetection", grid_size=0.01),
+            dict(type="PointSubsampleDetection", num_points=40000),
+        ],
     ),
 )
 

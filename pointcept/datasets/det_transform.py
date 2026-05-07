@@ -10,6 +10,10 @@ Expected dict keys (any may be absent if the sample has no boxes):
 
     point_cloud           : (N, 3 or 4) float32 — XYZ in cols 0..3, optional
                             intensity in col 3
+    segment               : (N,) int64 — optional per-point semantic labels
+                            (multi-task semseg branch). Indexed in lockstep
+                            with ``point_cloud`` by every transform that
+                            subsamples or reorders points.
     gt_box_centers_raw    : (n, 3) float — pre-pad full-precision centers
     gt_box_sizes_raw      : (n, 3) float — full size (not half)
     gt_box_angles_raw     : (n,)   float — yaw in radians, wrapped to (-π, π]
@@ -23,9 +27,59 @@ import numpy as np
 from .scannet_detection import _rotz
 from .transform import TRANSFORMS
 
+# Per-point dict keys that point-subsampling / point-cropping transforms
+# must index in lockstep with ``point_cloud``. Add new keys here as the
+# dataset starts emitting more per-point arrays (normals, intensity arrays
+# stored separately, etc.).
+_PER_POINT_KEYS = ("point_cloud", "segment", "pcl_color")
+
 
 def _wrap_pi(angle):
     return (angle + np.pi) % (2 * np.pi) - np.pi
+
+
+def _index_per_point_keys(data_dict, idx):
+    """Index every per-point array in ``data_dict`` by ``idx`` (mask or int array)."""
+    for k in _PER_POINT_KEYS:
+        if k in data_dict:
+            data_dict[k] = data_dict[k][idx]
+
+
+def _fnv_hash_vec(arr):
+    """FNV64-1A hash of (N, D) integer voxel coordinates → (N,) uint64.
+
+    Mirrors ``GridSample.fnv_hash_vec`` in ``pointcept/datasets/transform.py``
+    so the detection-side voxelization is bit-compatible with the segmentation
+    pipeline.
+    """
+    assert arr.ndim == 2
+    arr = arr.copy().astype(np.uint64, copy=False)
+    hashed = np.uint64(14695981039346656037) * np.ones(
+        arr.shape[0], dtype=np.uint64
+    )
+    for j in range(arr.shape[1]):
+        hashed = hashed * np.uint64(1099511628211)
+        hashed = np.bitwise_xor(hashed, arr[:, j])
+    return hashed
+
+
+def _ravel_hash_vec(arr):
+    """Ravel-style hash of (N, D) integer voxel coordinates → (N,) uint64.
+
+    Mirror of ``GridSample.ravel_hash_vec``.
+    """
+    assert arr.ndim == 2
+    arr = arr.copy()
+    arr -= arr.min(0)
+    arr = arr.astype(np.uint64, copy=False)
+    arr_max = arr.max(0).astype(np.uint64) + 1
+
+    keys = np.zeros(arr.shape[0], dtype=np.uint64)
+    for j in range(arr.shape[1] - 1):
+        keys += arr[:, j]
+        keys *= arr_max[j + 1]
+    keys += arr[:, -1]
+    return keys
 
 
 @TRANSFORMS.register_module()
@@ -208,7 +262,7 @@ class RandomCuboidDetection(object):
             else:
                 box_mask = None
 
-            data_dict["point_cloud"] = pc[point_mask]
+            _index_per_point_keys(data_dict, point_mask)
             if has_boxes:
                 data_dict["gt_box_centers_raw"] = centers[box_mask]
                 data_dict["gt_box_sizes_raw"] = data_dict["gt_box_sizes_raw"][box_mask]
@@ -296,7 +350,7 @@ class SphericalCropDetection(object):
             pc = data_dict["point_cloud"]
             r = self._radius(pc, cfg)
             point_mask = (r >= cfg["min_dist"]) & (r <= cfg["max_dist"])
-            data_dict["point_cloud"] = pc[point_mask]
+            _index_per_point_keys(data_dict, point_mask)
 
         if (
             cfg["drop_boxes_outside"]
@@ -416,7 +470,7 @@ class FovCropDetection(object):
 
         if cfg["crop_points"] and "point_cloud" in data_dict:
             pc = data_dict["point_cloud"]
-            data_dict["point_cloud"] = pc[self._mask(pc, cfg)]
+            _index_per_point_keys(data_dict, self._mask(pc, cfg))
 
         if (
             "gt_box_centers_raw" in data_dict
@@ -455,8 +509,86 @@ class PointSubsampleDetection(object):
             data_dict["point_cloud"] = np.zeros(
                 (self.num_points, pc.shape[1]), dtype=pc.dtype
             )
+            if "segment" in data_dict:
+                # No labelled points — fill with the standard ignore index.
+                data_dict["segment"] = np.full(
+                    (self.num_points,), -1, dtype=data_dict["segment"].dtype
+                )
+            if "pcl_color" in data_dict:
+                color = data_dict["pcl_color"]
+                data_dict["pcl_color"] = np.zeros(
+                    (self.num_points, color.shape[1]) if color.ndim == 2
+                    else (self.num_points,),
+                    dtype=color.dtype,
+                )
             return data_dict
         replace = n < self.num_points
         choices = np.random.choice(n, self.num_points, replace=replace)
-        data_dict["point_cloud"] = pc[choices]
+        _index_per_point_keys(data_dict, choices)
+        return data_dict
+
+
+@TRANSFORMS.register_module()
+class GridSampleDetection(object):
+    """Voxel-deduplicate the point cloud (one random point per voxel).
+
+    Mirrors the train-mode behaviour of the segmentation
+    ``GridSample`` transform (``pointcept/datasets/transform.py:840``) so
+    PointTransformerV3's input contract — one feature per voxel — is honoured
+    in the detection pipeline. Without this step ``PTv3PreEncoder`` receives
+    duplicate-voxel tokens (multiple points landing in the same voxel are
+    serialised separately and burn attention compute in the first encoder
+    stage).
+
+    The transform indexes every key in :data:`_PER_POINT_KEYS` that is
+    present in the dict, so ``segment`` (and any future per-point arrays)
+    survive in lockstep with ``point_cloud``. Boxes are unaffected.
+
+    Args:
+        grid_size: voxel size in metres. Match the value passed to the
+            model's ``PTv3PreEncoder`` so the in-model serialisation grid
+            and the upstream dedup grid agree.
+        hash_type: ``"fnv"`` (default) or ``"ravel"``. Match the seg
+            pipeline if you want bit-identical voxel hashing.
+
+    Notes:
+        - Eval/test pipelines should still include this transform: the user
+          chose train-mode behaviour (one random point per voxel) for both
+          to keep training and evaluation point distributions aligned.
+        - ``grid_coord`` is **not** written into the dict. The model rebuilds
+          the Pointcept ``Point`` and recomputes ``grid_coord`` inside the
+          encoder, so propagating it would be dead weight for the dense
+          ``(B, N, 3+C)`` interface.
+    """
+
+    def __init__(self, grid_size=0.02, hash_type="fnv"):
+        assert hash_type in ("fnv", "ravel"), (
+            f"hash_type must be 'fnv' or 'ravel'; got {hash_type!r}"
+        )
+        self.grid_size = float(grid_size)
+        self._hash = _fnv_hash_vec if hash_type == "fnv" else _ravel_hash_vec
+
+    def __call__(self, data_dict):
+        if "point_cloud" not in data_dict:
+            return data_dict
+        pc = data_dict["point_cloud"]
+        if pc.shape[0] == 0:
+            return data_dict
+
+        grid_coord = np.floor(pc[:, :3] / self.grid_size).astype(np.int64)
+        grid_coord -= grid_coord.min(0)
+
+        key = self._hash(grid_coord)
+        idx_sort = np.argsort(key)
+        key_sort = key[idx_sort]
+        _, _, count = np.unique(key_sort, return_inverse=True, return_counts=True)
+
+        # Pick one random index per voxel (mirrors transform.py:874-879).
+        idx_select = (
+            np.cumsum(np.insert(count, 0, 0)[:-1])
+            + np.random.randint(0, count.max(), count.size) % count
+        )
+        idx_unique = idx_sort[idx_select]
+
+        _index_per_point_keys(data_dict, idx_unique)
         return data_dict

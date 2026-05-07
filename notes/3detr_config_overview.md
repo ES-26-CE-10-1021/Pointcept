@@ -19,6 +19,16 @@ oriented boxes encoded via `num_angle_bin=12`, SUN-RGBD-style).
 root's `calibration.yml` before R_level.
 
 **Augmentation** is config-driven via a `transform=[...]` list (Pointcept-style).
+The same pipeline now drives **both** ScanNet (`ScanNetDetectionDataset`) and
+AGCO (`AgcoBBoxV1`) — ScanNet's legacy `augment=True` /
+`random_cuboid_min_points` kwargs were removed and replaced by the same
+detection-aware transform list. ScanNet keeps `use_color`, `use_height`, and
+`utonia_preprocess` as deterministic dataset kwargs that run before the
+transform pipeline. PTv3-using ScanNet configs (v2/v3/v4 + all utonia
+variants) include `GridSampleDetection` in every split's transform list with
+`grid_size` matching the pre-encoder. Both datasets accept an optional
+`load_segment=False` kwarg for the upcoming multi-task semseg branch.
+
 Detection-aware transforms registered in `pointcept/datasets/det_transform.py`:
 
 | Transform                  | Knobs                                                             |
@@ -28,7 +38,14 @@ Detection-aware transforms registered in `pointcept/datasets/det_transform.py`:
 | `RandomScaleDetection`     | `scale=(lo, hi)`, `apply_to_sizes=True`.                           |
 | `RandomJitterDetection`    | `sigma`, `clip` — Gaussian jitter on point XYZ only.               |
 | `RandomCuboidDetection`    | `min_points`, `aspect`, `min_crop`, `max_crop`; filters boxes.     |
+| `GridSampleDetection`      | `grid_size`, `hash_type`; one random point per voxel (mirrors seg `GridSample` train mode). Place after geometric augs, before `PointSubsampleDetection`. Required for PTv3 pre-encoders so the input contract (one feature per voxel) is honoured. |
 | `PointSubsampleDetection`  | `num_points` — fixed-size subsample; dataset enforces as fallback. |
+
+All point-subsampling / point-cropping transforms (`RandomCuboidDetection`,
+`SphericalCropDetection`, `FovCropDetection`, `GridSampleDetection`,
+`PointSubsampleDetection`) index every key in `det_transform._PER_POINT_KEYS`
+(currently `point_cloud` and `segment`) in lockstep, so optional per-point
+labels for the upcoming multi-task semseg branch survive the pipeline.
 
 Legacy `augment` and `random_cuboid_min_points` kwargs were removed.
 
