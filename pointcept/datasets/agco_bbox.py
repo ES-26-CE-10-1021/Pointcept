@@ -231,6 +231,13 @@ class AgcoBBoxV1(Dataset):
             ``("tractor", "harvester", "trailer", "car", "hopper")``. When
             customising, pass the same tuple to ``AgcoBBoxConfig`` so the
             detector head's ``num_semcls`` and ``type2class`` agree.
+        nonempty_oversample (float): if >1.0, duplicate samples that contain at
+            least one kept GT box (after ``min_inliers`` / ``included_classes``
+            filtering). Empty samples are kept once. The multiplier may be
+            fractional: ``2.5`` means each non-empty sample appears 2× plus an
+            extra copy for the first 50% (deterministic, by enumeration order).
+            Default ``1.0`` (no oversampling). Costs one extra JSON read per
+            sample at ``__init__`` time.
         apply_r_level_to_points (bool): if True, rotate point cloud XYZ by
             `R_level`. Default False — matches the visualizer flag default.
         apply_r_level_to_boxes (bool): if True, rotate box centers and
@@ -267,6 +274,7 @@ class AgcoBBoxV1(Dataset):
         dataset_config=None,
         min_inliers=67,
         included_classes=None,
+        nonempty_oversample: float = 1.0,
         apply_r_level_to_points=False,
         apply_r_level_to_boxes=False,
         apply_t_rtk: bool = False,
@@ -305,6 +313,10 @@ class AgcoBBoxV1(Dataset):
             else _DEFAULT_INCLUDED_CLASSES
         )
         self.disk_label_to_class = _build_disk_label_to_class(self.included_classes)
+        self.nonempty_oversample = float(nonempty_oversample)
+        assert self.nonempty_oversample >= 1.0, (
+            f"nonempty_oversample must be >= 1.0, got {self.nonempty_oversample}"
+        )
         self.apply_r_level_to_points = bool(apply_r_level_to_points)
         self.apply_r_level_to_boxes = bool(apply_r_level_to_boxes)
         self.apply_t_rtk = bool(apply_t_rtk)
@@ -373,10 +385,33 @@ class AgcoBBoxV1(Dataset):
                     ):
                         self.samples.append((ridx, sensor, ts))
 
-        print(
-            f"[AgcoBBoxV1] {split}: {len(self.samples)} samples across "
-            f"{len(self.roots)} roots, sensors={list(self.sensors)}"
-        )
+        n_total = len(self.samples)
+
+        if self.nonempty_oversample > 1.0 and n_total > 0:
+            empty_samples = []
+            nonempty_samples = []
+            for s in self.samples:
+                ridx, sensor, ts = s
+                if self._count_kept_boxes(self.roots[ridx], sensor, ts) > 0:
+                    nonempty_samples.append(s)
+                else:
+                    empty_samples.append(s)
+            base = int(np.floor(self.nonempty_oversample))
+            frac = self.nonempty_oversample - base
+            extras = int(round(frac * len(nonempty_samples)))
+            duplicated = nonempty_samples * base + nonempty_samples[:extras]
+            self.samples = empty_samples + duplicated
+            print(
+                f"[AgcoBBoxV1] {split}: oversample={self.nonempty_oversample:g} "
+                f"-> {len(empty_samples)} empty + {len(nonempty_samples)} unique "
+                f"non-empty (×{len(duplicated)/max(1,len(nonempty_samples)):.2f}) "
+                f"= {len(self.samples)} samples (was {n_total})"
+            )
+        else:
+            print(
+                f"[AgcoBBoxV1] {split}: {n_total} samples across "
+                f"{len(self.roots)} roots, sensors={list(self.sensors)}"
+            )
 
     def __len__(self):
         return len(self.samples) * self.loop
@@ -405,6 +440,26 @@ class AgcoBBoxV1(Dataset):
                     [pts, np.zeros((pts.shape[0], 1), dtype=np.float32)], axis=1
                 )
         return pts
+
+    def _count_kept_boxes(self, abs_root, sensor, ts):
+        path = os.path.join(abs_root, sensor, "annotations", f"{ts}.json")
+        with open(path, "r") as f:
+            data = json.load(f)
+        threshold = (
+            self.min_inliers[sensor]
+            if isinstance(self.min_inliers, dict)
+            else self.min_inliers
+        )
+        kept = 0
+        for b in data.get("annotations", []):
+            if not (b.get("is_visible", True) and b.get("inliers", 0) >= threshold):
+                continue
+            if int(b.get("label", -1)) in self.disk_label_to_class:
+                kept += 1
+            for c in b.get("children", []):
+                if int(c.get("label", -1)) in self.disk_label_to_class:
+                    kept += 1
+        return kept
 
     def _load_boxes(self, abs_root, sensor, ts):
         path = os.path.join(abs_root, sensor, "annotations", f"{ts}.json")
