@@ -231,6 +231,13 @@ class AgcoBBoxV1(Dataset):
             ``("tractor", "harvester", "trailer", "car", "hopper")``. When
             customising, pass the same tuple to ``AgcoBBoxConfig`` so the
             detector head's ``num_semcls`` and ``type2class`` agree.
+        fixed_pc_dims (dict | None): if a dict, use fixed per-sensor bounds for
+            normalizing box centers/sizes (and for the
+            ``point_cloud_dims_min/max`` returned to the model). Format:
+            ``{sensor: {"min": [x, y, z], "max": [x, y, z]}}`` with an entry
+            for every sensor in ``sensors``. ``None`` (default) falls back to
+            per-sample min/max of the post-augmentation point cloud — this is
+            unstable across samples for outdoor LiDAR where extents vary.
         nonempty_oversample (float): if >1.0, duplicate samples that contain at
             least one kept GT box (after ``min_inliers`` / ``included_classes``
             filtering). Empty samples are kept once. The multiplier may be
@@ -275,6 +282,7 @@ class AgcoBBoxV1(Dataset):
         min_inliers=67,
         included_classes=None,
         nonempty_oversample: float = 1.0,
+        fixed_pc_dims=None,
         apply_r_level_to_points=False,
         apply_r_level_to_boxes=False,
         apply_t_rtk: bool = False,
@@ -317,6 +325,34 @@ class AgcoBBoxV1(Dataset):
         assert self.nonempty_oversample >= 1.0, (
             f"nonempty_oversample must be >= 1.0, got {self.nonempty_oversample}"
         )
+
+        # Per-sensor fixed normalization bounds. None -> use per-sample min/max
+        # (legacy behavior). Otherwise a dict {sensor: {"min": [..], "max": [..]}}
+        # with an entry for every sensor in `self.sensors`.
+        self.fixed_pc_dims = fixed_pc_dims
+        self._fixed_pc_dims_arr = None
+        if self.fixed_pc_dims is not None:
+            assert isinstance(self.fixed_pc_dims, dict), (
+                f"fixed_pc_dims must be a dict or None, got {type(self.fixed_pc_dims)}"
+            )
+            missing = set(self.sensors) - set(self.fixed_pc_dims.keys())
+            assert not missing, (
+                f"fixed_pc_dims is missing entries for sensors: {sorted(missing)}"
+            )
+            self._fixed_pc_dims_arr = {}
+            for s in self.sensors:
+                entry = self.fixed_pc_dims[s]
+                pc_min = np.asarray(entry["min"], dtype=np.float32)
+                pc_max = np.asarray(entry["max"], dtype=np.float32)
+                assert pc_min.shape == (3,) and pc_max.shape == (3,), (
+                    f"fixed_pc_dims[{s}] min/max must be length-3, got "
+                    f"{pc_min.shape} and {pc_max.shape}"
+                )
+                assert np.all(pc_max > pc_min), (
+                    f"fixed_pc_dims[{s}] requires max > min element-wise; got "
+                    f"min={pc_min.tolist()} max={pc_max.tolist()}"
+                )
+                self._fixed_pc_dims_arr[s] = (pc_min, pc_max)
         self.apply_r_level_to_points = bool(apply_r_level_to_points)
         self.apply_r_level_to_boxes = bool(apply_r_level_to_boxes)
         self.apply_t_rtk = bool(apply_t_rtk)
@@ -639,8 +675,13 @@ class AgcoBBoxV1(Dataset):
             gt_angle_res[i] = res
 
         # Normalized centers / sizes in the point-cloud bbox.
-        point_cloud_dims_min = point_cloud[:, :3].min(axis=0).astype(np.float32)
-        point_cloud_dims_max = point_cloud[:, :3].max(axis=0).astype(np.float32)
+        if self._fixed_pc_dims_arr is not None:
+            point_cloud_dims_min, point_cloud_dims_max = self._fixed_pc_dims_arr[sensor]
+            point_cloud_dims_min = point_cloud_dims_min.copy()
+            point_cloud_dims_max = point_cloud_dims_max.copy()
+        else:
+            point_cloud_dims_min = point_cloud[:, :3].min(axis=0).astype(np.float32)
+            point_cloud_dims_max = point_cloud[:, :3].max(axis=0).astype(np.float32)
         mult_factor = point_cloud_dims_max - point_cloud_dims_min
 
         box_centers_normalized = _shift_scale_points(

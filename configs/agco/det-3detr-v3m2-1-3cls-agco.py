@@ -1,11 +1,18 @@
 """
-3DETR on AGCO — v3m1-1-3cls: Overfitting config (train split on all splits).
+3DETR on AGCO — v3m2-1-3cls: Overfitting config with fixed per-sensor
+normalization and reduced query count.
 
-Identical to configs/agco/det-3detr-v3m1-1-agco.py except `included_classes` is reduced
-to 3 (discards car and hopper). Uses train split for val/test to overfit on training data.
+Diff vs configs/agco/det-3detr-v3m1-1-3cls-agco.py:
+  - num_queries: 128 -> 32   (fewer FPS seeds; suppresses duplicate-box doubles
+                              that hurt AP50)
+  - fixed_pc_dims: per-sensor fixed bounds for center/size normalization, in
+    place of the per-sample point-cloud min/max. Stabilizes regression targets
+    and keeps a sensor's normalized box sizes/centers consistent across frames.
+    Bounds derived from p01/p99 of post-transform extents (tools/agco_pc_dims_stats.py)
+    with ~0.5–1.0 m headroom for rotation aug + residual levelling noise.
 
 Usage:
-    sh scripts/train.sh -d agco -c det-3detr-v3m1-1-3cls-agco -n 3detr_agco_v3_3cls_overfit -g 2
+    sh scripts/train.sh -d agco -c det-3detr-v3m2-1-3cls-agco -n 3detr_agco_v3m2_3cls_overfit -g 2
 """
 
 _base_ = ["../_base_/default_runtime.py"]
@@ -78,7 +85,7 @@ model = dict(
     ),
     encoder_dim=512,    # must match enc_channels[-1]; encoder_to_decoder_projection handles 512->256
     decoder_dim=256,
-    num_queries=128,
+    num_queries=32,     # reduced from 128 to suppress duplicate predictions
     position_embedding="fourier",
     mlp_dropout=0.3,
     projection_norm="ln",
@@ -129,6 +136,13 @@ num_points = 100_000
 class_names = list(included_classes)
 min_inliers = dict(lslidar=350, ouster=200, rslidar=80)
 
+# Per-sensor fixed normalization bounds (derived from p01/p99 of post-transform extents via tools/agco_pc_dims_stats.py).
+fixed_pc_dims = {
+    "lslidar": dict(min=[ 0.0, -55.0, -11.0], max=[60.0, 55.0, 10.0]),
+    "ouster":  dict(min=[ 0.0, -36.0, -10.0], max=[40.0, 36.0,  8.0]),
+    "rslidar": dict(min=[ 0.0,  -8.5,  -8.0], max=[20.0,  8.5,  6.0]),
+}
+
 # Shared deterministic crops (lslidar effective range + ±60° FOV wedge).
 det_crop_transforms = [
     dict(
@@ -143,8 +157,8 @@ det_crop_transforms = [
         },
     ),
     dict(
-        type="SphericalCropDetection", 
-        max_dist=60.0, 
+        type="SphericalCropDetection",
+        max_dist=60.0,
         min_dist=1.0,
         per_sensor={
             "lslidar": dict(max_dist=60.0),
@@ -171,6 +185,7 @@ data = dict(
         num_points=num_points,
         min_inliers=min_inliers,
         included_classes=included_classes,
+        fixed_pc_dims=fixed_pc_dims,
 
         apply_t_rtk=True,
         require_calibration=True,
@@ -204,6 +219,7 @@ data = dict(
         num_points=num_points,
         min_inliers=min_inliers,
         included_classes=included_classes,
+        fixed_pc_dims=fixed_pc_dims,
 
         apply_t_rtk=True,
         require_calibration=True,
@@ -235,6 +251,7 @@ data = dict(
         num_points=num_points,
         min_inliers=min_inliers,
         included_classes=included_classes,
+        fixed_pc_dims=fixed_pc_dims,
 
         apply_t_rtk=True,
         require_calibration=True,
