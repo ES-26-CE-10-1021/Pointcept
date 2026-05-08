@@ -15,11 +15,14 @@ Loss components:
 Uses Hungarian matching (Matcher) to assign predictions to GT boxes.
 """
 
+import logging
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from scipy.optimize import linear_sum_assignment
+
+logger = logging.getLogger(__name__)
 
 from pointcept.models.losses.builder import LOSSES
 from .dataset_config import _setup_3detr_path
@@ -143,6 +146,10 @@ class SetCriterion3DETR(nn.Module):
 
         self.num_semcls = num_semcls
         self.num_angle_bin = num_angle_bin
+
+        # Counts how many times the GIoU clamp has fired; used for rate-limited
+        # logging so anomalies are visible without spamming the training log.
+        self._giou_anomaly_count = 0
 
         semcls_percls_weights = torch.ones(num_semcls + 1)
         semcls_percls_weights[-1] = loss_weight_dict.get("loss_no_object_weight", 0.25)
@@ -277,14 +284,76 @@ class SetCriterion3DETR(nn.Module):
             size_loss = torch.zeros(1, device=pred_box_sizes.device).squeeze()
         return {"loss_size": size_loss}
 
+    def _use_rotated_boxes(self) -> bool:
+        """True when the dataset uses oriented boxes (num_angle_bin > 1).
+
+        Deciding from config rather than from batch GT angles avoids a silent
+        failure mode: if a batch happens to have all GT yaw = 0 (early training,
+        or a fully axis-aligned scene), torch.any(gt_angles > 0) returns False
+        and the axis-aligned AABB path would be used even though predictions may
+        have non-zero yaw, producing wrong GIoU.
+        """
+        return self.num_angle_bin > 1
+
     def single_output_forward(self, outputs, targets):
         gious = generalized_box3d_iou(
             outputs["box_corners"],
             targets["gt_box_corners"],
             targets["nactual_gt"],
-            rotated_boxes=torch.any(targets["gt_box_angles"] > 0).item(),
+            rotated_boxes=self._use_rotated_boxes(),
             needs_grad=(self._loss_weight_dict.get("loss_giou_weight", 0) > 0),
         )
+
+        # ── GIoU sanity check + sanitise + clamp ─────────────────────────────
+        # GIoU ∈ [-1, 1] by construction.  Values outside that range, or
+        # non-finite values, signal a geometry failure in the polygon
+        # intersection code.  Root-cause fixes live in box_util.py
+        # (signed-distance parametric clipping + footprint-area physical
+        # clamp).  The block below is the final safety net.
+        #
+        # NaN/Inf detection: evaluate finite and out-of-range separately so
+        # we still get meaningful min/max from the finite elements even when
+        # some entries are NaN or Inf.
+        _GIOU_TOL = 1e-4
+        finite_mask = gious.isfinite()
+        num_nan = int(gious.isnan().sum())
+        num_posinf = int(gious.isposinf().sum())
+        num_neginf = int(gious.isneginf().sum())
+        if finite_mask.any():
+            finite_gious = gious[finite_mask]
+            gious_min = finite_gious.min().item()
+            gious_max = finite_gious.max().item()
+        else:
+            gious_min = float("nan")
+            gious_max = float("nan")
+
+        has_nonfinite = (num_nan + num_posinf + num_neginf) > 0
+        has_out_of_range = gious_max > 1.0 + _GIOU_TOL or gious_min < -1.0 - _GIOU_TOL
+        if has_nonfinite or has_out_of_range:
+            self._giou_anomaly_count += 1
+            n = self._giou_anomaly_count
+            if n == 1 or n % 100 == 0:
+                logger.warning(
+                    "GIoU anomaly #%d: finite min=%.4g max=%.4g "
+                    "nan=%d +inf=%d -inf=%d. "
+                    "pred_angles_deg=[%.1f, %.1f]  "
+                    "gt_angles_deg=[%.1f, %.1f]. "
+                    "Sanitising with nan_to_num then clamp(-1, 1).",
+                    n,
+                    gious_min,
+                    gious_max,
+                    num_nan,
+                    num_posinf,
+                    num_neginf,
+                    float(outputs["angle_continuous"].min()) * 180.0 / 3.14159,
+                    float(outputs["angle_continuous"].max()) * 180.0 / 3.14159,
+                    float(targets["gt_box_angles"].min()) * 180.0 / 3.14159,
+                    float(targets["gt_box_angles"].max()) * 180.0 / 3.14159,
+                )
+
+        # nan_to_num first: clamp(-1, 1) passes NaNs through unchanged.
+        gious = torch.nan_to_num(gious, nan=-1.0, posinf=1.0, neginf=-1.0)
+        gious = gious.clamp(-1.0, 1.0)
         outputs["gious"] = gious
         center_dist = torch.cdist(
             outputs["center_normalized"], targets["gt_box_centers_normalized"], p=1
