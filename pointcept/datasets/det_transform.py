@@ -212,6 +212,11 @@ class RandomCuboidDetection(object):
             if "segment" in data_dict:
                 data_dict["segment"] = data_dict["segment"][point_mask]
 
+            if "coord" in data_dict:
+                data_dict["coord"] = data_dict["coord"][point_mask]
+            if "grid_coord" in data_dict:
+                data_dict["grid_coord"] = data_dict["grid_coord"][point_mask]
+            
             if has_boxes:
                 data_dict["gt_box_centers_raw"] = centers[box_mask]
                 data_dict["gt_box_sizes_raw"] = data_dict["gt_box_sizes_raw"][box_mask]
@@ -273,6 +278,10 @@ class SphericalCropDetection(object):
 
             if "segment" in data_dict:
                 data_dict["segment"] = data_dict["segment"][point_mask]
+            if "coord" in data_dict:
+                data_dict["coord"] = data_dict["coord"][point_mask]
+            if "grid_coord" in data_dict:
+                data_dict["grid_coord"] = data_dict["grid_coord"][point_mask]
         if (
             self.drop_boxes_outside
             and "gt_box_centers_raw" in data_dict
@@ -359,8 +368,11 @@ class FovCropDetection(object):
     
             if "segment" in data_dict:
                 data_dict["segment"] = data_dict["segment"][mask]
+            if "coord" in data_dict:
+                data_dict["coord"] = data_dict["coord"][mask]
 
-
+            if "grid_coord" in data_dict:
+                data_dict["grid_coord"] = data_dict["grid_coord"][mask]
         if (
             "gt_box_centers_raw" in data_dict
             and len(data_dict["gt_box_centers_raw"]) > 0
@@ -401,6 +413,8 @@ class PointSubsampleDetection(object):
             if "segment" in data_dict:
                 data_dict["segment"] = np.zeros(self.num_points, dtype=pc.dtype)
 
+            if "coord" in data_dict:
+                data_dict["coord"] = np.zeros(self.num_points, dtype=pc.dtype)
             return data_dict
         replace = n < self.num_points
         choices = np.random.choice(n, self.num_points, replace=replace)
@@ -408,5 +422,13 @@ class PointSubsampleDetection(object):
             
         if "segment" in data_dict:
             data_dict["segment"] = data_dict["segment"][choices]
+
+        if "coord" in data_dict:
+            data_dict["coord"] = data_dict["coord"][choices]
+        
+        if "grid_coord" in data_dict:
+            data_dict["grid_coord"] = data_dict["grid_coord"][choices]
+        # print(f"point cloud {data_dict['point_cloud'].shape}, segment {data_dict['segment'].shape}, coord {data_dict['coord'].shape}")
+
 
         return data_dict

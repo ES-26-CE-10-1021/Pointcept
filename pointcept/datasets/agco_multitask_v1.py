@@ -328,30 +328,7 @@ class AgcoMultiTaskV1(Dataset):
     def __len__(self):
         return len(self.samples) * self.loop
 
-    # ------------------------------------------------------------------
 
-    # def _load_scan(self, abs_root, sensor, ts):
-    #     coord_path = os.path.join(
-    #         abs_root, sensor, "pointcloud_raw", "coord", f"{ts}.npy"
-    #     )
-    #     pts = np.load(coord_path).astype(np.float32)
-    #     if pts.ndim != 2 or pts.shape[1] < 3:
-    #         raise ValueError(
-    #             f"Unexpected point cloud shape {pts.shape} at {coord_path}"
-    #         )
-    #     pts = pts[:, :3]
-    #     if self.use_intensity:
-    #         intensity_path = os.path.join(
-    #             abs_root, sensor, "pointcloud_raw", "intensity", f"{ts}.npy"
-    #         )
-    #         if os.path.isfile(intensity_path):
-    #             intensity = np.load(intensity_path).astype(np.float32)
-    #             pts = np.concatenate([pts, intensity[:, None]], axis=1)
-    #         else:
-    #             pts = np.concatenate(
-    #                 [pts, np.zeros((pts.shape[0], 1), dtype=np.float32)], axis=1
-    #             )
-    #     return pts
 
     def _load_scan(self, data_dir, sensor, fname):
         base = os.path.join(data_dir, sensor, "pointcloud_raw")
@@ -511,6 +488,7 @@ class AgcoMultiTaskV1(Dataset):
 
         # --- Augmentation pipeline (config-driven) ---
         data_dict = {
+            "coord":point_cloud,
             "point_cloud": point_cloud,
             "segment": segment,
             "gt_box_centers_raw": centers_raw,
@@ -519,8 +497,13 @@ class AgcoMultiTaskV1(Dataset):
             "gt_box_labels_raw": labels_raw,
         }
         data_dict = self.transform(data_dict)
+        grid_coord = data_dict["grid_coord"]
         point_cloud = data_dict["point_cloud"]
         segment = data_dict["segment"]
+
+        
+        # print(f"point cloud {data_dict['point_cloud'].shape}, segment {data_dict['segment'].shape}, coord {data_dict['coord'].shape}")
+
         centers_raw = data_dict["gt_box_centers_raw"]
         sizes_raw = data_dict["gt_box_sizes_raw"]
         yaws_raw = data_dict["gt_box_angles_raw"]
@@ -630,6 +613,7 @@ class AgcoMultiTaskV1(Dataset):
             roundtrip_diag["center_l2_max"] = float(np.max(center_err))
 
         return {
+            "grid_coord":grid_coord,
             "point_clouds": point_cloud,
             "segment": segment,
             "point_cloud_dims_min": point_cloud_dims_min,

@@ -43,5 +43,8 @@ from .scannet_detection import ScanNetDetectionDataset
 from . import det_transform  # noqa: F401  (registers detection-aware transforms)
 from .agco_bbox import AgcoBBoxV1
 
+# multitask
+from .agco_multitask_v1 import AgcoMultiTaskV1 
+
 # dataloader
 from .dataloader import MultiDatasetDataloader
