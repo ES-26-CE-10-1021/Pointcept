@@ -209,6 +209,9 @@ class RandomCuboidDetection(object):
                 box_mask = None
 
             data_dict["point_cloud"] = pc[point_mask]
+            if "segment" in data_dict:
+                data_dict["segment"] = data_dict["segment"][point_mask]
+
             if has_boxes:
                 data_dict["gt_box_centers_raw"] = centers[box_mask]
                 data_dict["gt_box_sizes_raw"] = data_dict["gt_box_sizes_raw"][box_mask]
@@ -268,6 +271,8 @@ class SphericalCropDetection(object):
             point_mask = (r >= self.min_dist) & (r <= self.max_dist)
             data_dict["point_cloud"] = pc[point_mask]
 
+            if "segment" in data_dict:
+                data_dict["segment"] = data_dict["segment"][point_mask]
         if (
             self.drop_boxes_outside
             and "gt_box_centers_raw" in data_dict
@@ -349,7 +354,12 @@ class FovCropDetection(object):
     def __call__(self, data_dict):
         if self.crop_points and "point_cloud" in data_dict:
             pc = data_dict["point_cloud"]
-            data_dict["point_cloud"] = pc[self._mask(pc)]
+            mask = self._mask(pc)
+            data_dict["point_cloud"] = pc[mask]
+    
+            if "segment" in data_dict:
+                data_dict["segment"] = data_dict["segment"][mask]
+
 
         if (
             "gt_box_centers_raw" in data_dict
@@ -388,8 +398,15 @@ class PointSubsampleDetection(object):
             data_dict["point_cloud"] = np.zeros(
                 (self.num_points, pc.shape[1]), dtype=pc.dtype
             )
+            if "segment" in data_dict:
+                data_dict["segment"] = np.zeros(self.num_points, dtype=pc.dtype)
+
             return data_dict
         replace = n < self.num_points
         choices = np.random.choice(n, self.num_points, replace=replace)
         data_dict["point_cloud"] = pc[choices]
+            
+        if "segment" in data_dict:
+            data_dict["segment"] = data_dict["segment"][choices]
+
         return data_dict
