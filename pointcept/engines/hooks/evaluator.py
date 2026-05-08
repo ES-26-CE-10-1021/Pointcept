@@ -1244,6 +1244,42 @@ class CombinedSegDetEvaluator(HookBase):
                         step=wandb.run.step,
                     )
 
+            # Surface uncertainty σ values when the model uses learnable
+            # multi-task weighting. Read from the unwrapped (DDP-unaware)
+            # module so we can pull the log_sigma_sq_* parameters.
+            mt_model = (
+                self.trainer.model.module
+                if hasattr(self.trainer.model, "module")
+                else self.trainer.model
+            )
+            if getattr(mt_model, "loss_weighting", "fixed") == "uncertainty":
+                sigma_seg = float(
+                    torch.exp(0.5 * mt_model.log_sigma_sq_seg).item()
+                )
+                sigma_det = float(
+                    torch.exp(0.5 * mt_model.log_sigma_sq_det).item()
+                )
+                self.trainer.logger.info(
+                    "Loss weighting: sigma_seg={:.4f}  sigma_det={:.4f}".format(
+                        sigma_seg, sigma_det
+                    )
+                )
+                if self.trainer.writer is not None:
+                    self.trainer.writer.add_scalar(
+                        "val/sigma_seg", sigma_seg, current_epoch
+                    )
+                    self.trainer.writer.add_scalar(
+                        "val/sigma_det", sigma_det, current_epoch
+                    )
+                    if self.trainer.cfg.enable_wandb:
+                        wandb.log(
+                            {
+                                "val/sigma_seg": sigma_seg,
+                                "val/sigma_det": sigma_det,
+                            },
+                            step=wandb.run.step,
+                        )
+
             self.trainer.logger.info(
                 "<<<<<<<<<<<<<<<<< End Multi-Task Evaluation <<<<<<<<<<<<<<<<<"
             )

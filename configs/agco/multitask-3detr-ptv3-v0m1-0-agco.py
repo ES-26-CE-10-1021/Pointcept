@@ -7,12 +7,20 @@ branch (Identity transformer encoder + 3DETR decoder) taps the encoder
 bottleneck.
 
 Dataset: ``AgcoBBoxV1(load_segment=True, segment_subdir="segment")``.
-Per-point semantic labels live at
-``<root>/<sensor>/segment/<ts>.npy`` (uint16, values currently observed in
-[0, 2] for one split — see /home/dreez/Downloads/agco_data/.../lslidar/segment/).
+Per-point semantic labels live at ``<root>/<sensor>/segment/<ts>.npy``
+(uint16; cast to int64 by the dataset). Class index space:
 
-# TODO confirm ``num_seg_classes`` against the actual on-disk label range
-# across all splits. The default (3) is provisional.
+    0 = background
+    1 = tractor
+    2 = harvester
+    3 = trailer
+    4 = car
+
+Note: ``hopper`` is detection-only — segmentation does not include hopper
+points (they're labelled either as their parent ``trailer`` or as background).
+The detection branch's ``included_classes`` is independent and may be a
+strict subset of the 5-tuple above (currently 3 classes); broaden if you
+want symmetric det+seg coverage.
 
 Usage:
     sh scripts/train.sh -d agco -c multitask-3detr-ptv3-v0m1-0-agco -n my_multitask -g 2
@@ -33,10 +41,9 @@ included_classes = ("tractor", "harvester", "trailer")
 num_semcls = len(included_classes)
 num_angle_bin = 12
 
-# Provisional — confirm before real training (see file docstring).
-num_seg_classes = 3
-seg_ignore_index = -1
-seg_class_names = [f"seg_class_{i}" for i in range(num_seg_classes)]
+num_seg_classes = 5
+seg_ignore_index = -1     # disk labels are 0..4; -1 means "no label" (unused)
+seg_class_names = ["background", "tractor", "harvester", "trailer", "car"]
 
 # ── Model ────────────────────────────────────────────────────────────────────
 model = dict(
@@ -123,9 +130,18 @@ model = dict(
     position_embedding="fourier",
     mlp_dropout=0.3,
     projection_norm="ln",
+    # Multi-task loss weighting — uncertainty (Cipolla, c_i=2) by default.
+    # Switch to "fixed" + seg_weight/det_weight for ablation.
+    loss_weighting="uncertainty",
+    c_seg=2.0,
+    c_det=2.0,
     seg_weight=1.0,
     det_weight=1.0,
 )
+
+# Exclude the learnable σ params from weight decay (scale parameters, not
+# weights). Substring match via pointcept/utils/optimizer.py:23.
+param_dicts = [dict(keyword="log_sigma_sq", weight_decay=0.0)]
 
 # ── Schedule ─────────────────────────────────────────────────────────────────
 epoch = 100

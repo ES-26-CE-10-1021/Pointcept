@@ -6,6 +6,14 @@ axis-aligned boxes). AGCO configs mirror the same naming under
 `AgcoBBoxConfig` (4 classes — hopper, tractor, harvester, trailer — with
 oriented boxes encoded via `num_angle_bin=12`, SUN-RGBD-style).
 
+> **Looking for the multi-task model?** The joint semseg + 3DETR detection
+> path (`MultiTask3DETRSegmentor`, `CombinedSegDetEvaluator`,
+> `CombinedSegDetTester`, the `multitask-3detr-ptv3-*` configs, the
+> uncertainty-weighted loss combination, and the AGCO segmentation label
+> layout) is documented separately in
+> [`multitask_ptv3_3detr.md`](multitask_ptv3_3detr.md). This file covers
+> the detection-only configs.
+
 | AGCO config | Pre-Encoder | Encoder | Notes |
 |-------------|-------------|---------|-------|
 | **v0m1-0**  | PointNet++ SA (2048 pts) | VanillaTransformer (3L) | Baseline on AGCO. num_queries=128, num_angle_bin=12 |
@@ -70,7 +78,6 @@ Legacy `augment` and `random_cuboid_min_points` kwargs were removed.
 | **utonia-v5m1-1** | Utonia, last enc stage + FPS 2048   | 576             | VanillaTransformer (3L) | 576         | 256         | 720    | v5m1-0 + fixed-length FPS                              |
 | **utonia-v5m2-0** | Frozen Utonia enc + fresh PTv3 dec  | 54              | VanillaTransformer (3L) | 54          | 256         | 720    | Learn a fresh decoder on frozen Utonia features        |
 | **utonia-v5m2-1** | Frozen Utonia enc + fresh dec + FPS | 54              | VanillaTransformer (3L) | 54          | 256         | 720    | v5m2-0 + fixed-length FPS                              |
-| **multitask-ptv3-v0m1-0** | PT-v3m1 full U-Net (enc→512, dec→64) | 512        | VanillaTransformer (3L) | 512         | 256         | 720    | Multi-task PTv3 + 3DETR det head; semseg head off the unpooled decoder, det branch off the encoder bottleneck. Uses `MultiTask3DETRSegmentor` + `CombinedSegDetEvaluator`/`CombinedSegDetTester`. AGCO mirror at `configs/agco/multitask-3detr-ptv3-v0m1-0-agco.py` (TODO: confirm `num_seg_classes`). |
 
 **Encoder layers**: "(3L)" means 3 transformer layers (`nlayers=3`). The decoder always uses 8 layers.
 

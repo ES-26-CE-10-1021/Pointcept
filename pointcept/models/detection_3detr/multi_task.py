@@ -61,8 +61,26 @@ class MultiTask3DETRSegmentor(nn.Module):
             ``backbone.enc_channels[-1]``). Passed to ``encoder_to_decoder_projection``.
         decoder_dim, num_queries, position_embedding, mlp_dropout, projection_norm:
             mirror ``Model3DETRDetector`` (``model.py:191``).
-        seg_weight, det_weight: float — combined loss is
+        loss_weighting: str — ``"uncertainty"`` (default, learnable σ per
+            branch following Cipolla et al.) or ``"fixed"`` (use the static
+            ``seg_weight`` / ``det_weight`` scalars for ablation).
+        c_seg, c_det: float — Cipolla's ``c_i`` factor (use 2 for
+            regression-like losses, 1 for classification-like). Both branches
+            here are mixtures of cls + reg sub-losses; default 2.0 for both
+            matches the literal thesis form.
+        seg_weight, det_weight: float — only used when
+            ``loss_weighting="fixed"``; combined loss is
             ``seg_weight * loss_seg + det_weight * loss_det``.
+
+    Uncertainty form (literal Cipolla, see thesis Eq. uncertainty_weighting):
+
+        L_total = (1 / (c_seg σ_seg²)) L_seg + log σ_seg
+                + (1 / (c_det σ_det²)) L_det + log σ_det
+
+    With ``s_i = log σ_i²`` as the learnable scalar (init zero → σ_i=1, which
+    matches ``seg_weight=det_weight=1`` on the first step). The σ params have
+    no weight decay — exclude them via a ``param_dicts`` entry like
+    ``dict(keyword="log_sigma_sq", weight_decay=0.0)``.
     """
 
     def __init__(
@@ -83,6 +101,9 @@ class MultiTask3DETRSegmentor(nn.Module):
         mlp_dropout=0.3,
         projection_norm="ln",
         seg_ignore_index=-1,
+        loss_weighting="uncertainty",
+        c_seg=2.0,
+        c_det=2.0,
         seg_weight=1.0,
         det_weight=1.0,
     ):
@@ -146,9 +167,21 @@ class MultiTask3DETRSegmentor(nn.Module):
         self.box_processor = BoxProcessor(self.dataset_config)
         self._build_mlp_heads(decoder_dim, mlp_dropout)
 
-        # ── Loss weights ──────────────────────────────────────────────────
-        self.seg_weight = float(seg_weight)
-        self.det_weight = float(det_weight)
+        # ── Loss weighting ────────────────────────────────────────────────
+        assert loss_weighting in ("uncertainty", "fixed"), (
+            f"loss_weighting must be 'uncertainty' or 'fixed'; got {loss_weighting!r}"
+        )
+        self.loss_weighting = loss_weighting
+        if loss_weighting == "uncertainty":
+            # Learnable s_i = log σ²_i, init 0 (σ_i = 1 → equivalent to
+            # seg_weight=det_weight=1 on the first step).
+            self.log_sigma_sq_seg = nn.Parameter(torch.zeros(()))
+            self.log_sigma_sq_det = nn.Parameter(torch.zeros(()))
+            self.c_seg = float(c_seg)
+            self.c_det = float(c_det)
+        else:
+            self.seg_weight = float(seg_weight)
+            self.det_weight = float(det_weight)
 
     # ------------------------------------------------------------------ MLP heads
     def _build_mlp_heads(self, decoder_dim, mlp_dropout):
@@ -402,6 +435,25 @@ class MultiTask3DETRSegmentor(nn.Module):
             segment = input_dict["segment"].reshape(-1)
             loss_seg = self.seg_criteria(seg_logits, segment)
             loss_det, _ = self.det_criterion(box_predictions, input_dict)
+
+            if self.loss_weighting == "uncertainty":
+                # Literal Cipolla: L_total = (1/(c_i σ_i²)) L_i + log σ_i,
+                # with σ_i = exp(s_i / 2) so log σ_i = 0.5 * s_i.
+                s_seg = self.log_sigma_sq_seg
+                s_det = self.log_sigma_sq_det
+                inv_var_seg = torch.exp(-s_seg) / self.c_seg
+                inv_var_det = torch.exp(-s_det) / self.c_det
+                loss = (
+                    inv_var_seg * loss_seg + 0.5 * s_seg
+                    + inv_var_det * loss_det + 0.5 * s_det
+                )
+                return dict(
+                    loss=loss,
+                    loss_seg=loss_seg.detach(),
+                    loss_det=loss_det.detach(),
+                    sigma_seg=torch.exp(0.5 * s_seg).detach(),
+                    sigma_det=torch.exp(0.5 * s_det).detach(),
+                )
             loss = self.seg_weight * loss_seg + self.det_weight * loss_det
             return dict(
                 loss=loss,

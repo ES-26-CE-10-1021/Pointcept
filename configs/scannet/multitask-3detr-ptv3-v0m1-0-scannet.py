@@ -147,10 +147,20 @@ model = dict(
     position_embedding="fourier",
     mlp_dropout=0.3,
     projection_norm="ln",
-    # Multi-task loss weights — tune as needed.
+    # Multi-task loss weighting — uncertainty (Cipolla, c_i=2) by default.
+    # Switch to "fixed" + seg_weight/det_weight for ablation against the
+    # fixed-weight baseline.
+    loss_weighting="uncertainty",
+    c_seg=2.0,
+    c_det=2.0,
     seg_weight=1.0,
     det_weight=1.0,
 )
+
+# Exclude the learnable σ params (log_sigma_sq_seg, log_sigma_sq_det) from
+# weight decay — they are scale parameters, not weights. Substring match
+# via pointcept/utils/optimizer.py:23.
+param_dicts = [dict(keyword="log_sigma_sq", weight_decay=0.0)]
 
 # ── Scheduler ────────────────────────────────────────────────────────────────
 epoch = 720
