@@ -184,7 +184,7 @@ data = dict(
         residual_rpy_warn_deg=10.0,
         transform=[
             *det_crop_transforms,
-            dict(type="PointSubsampleDetection", num_points=num_points),
+            dict(type="PointSubsampleDetection", num_points=num_points, deterministic=True, seed=0),
         ],
     ),
     val=dict(
@@ -210,7 +210,7 @@ data = dict(
         residual_rpy_warn_deg=10.0,
         transform=[
             *det_crop_transforms,
-            dict(type="PointSubsampleDetection", num_points=num_points),
+            dict(type="PointSubsampleDetection", num_points=num_points, deterministic=True, seed=0),
         ],
     ),
     test=dict(
@@ -236,7 +236,7 @@ data = dict(
         residual_rpy_warn_deg=10.0,
         transform=[
             *det_crop_transforms,
-            dict(type="PointSubsampleDetection", num_points=num_points),
+            dict(type="PointSubsampleDetection", num_points=num_points, deterministic=True, seed=0),
         ],
     ),
 )

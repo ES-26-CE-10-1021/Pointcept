@@ -700,6 +700,7 @@ class AgcoBBoxV1(Dataset):
             "gt_box_angles_raw": yaws_raw,
             "gt_box_labels_raw": labels_raw,
             "sensor": sensor,
+            "sample_index": int(idx % len(self.samples)),
         }
         data_dict = self.transform(data_dict)
         point_cloud = data_dict["point_cloud"]

@@ -441,8 +441,31 @@ class PointSubsampleDetection(object):
     strictly required for correctness.
     """
 
-    def __init__(self, num_points):
+    def __init__(
+        self,
+        num_points,
+        deterministic=False,
+        seed=0,
+        index_key="sample_index",
+        sensor_key="sensor",
+    ):
         self.num_points = int(num_points)
+        self.deterministic = bool(deterministic)
+        self.seed = int(seed)
+        self.index_key = str(index_key)
+        self.sensor_key = str(sensor_key)
+
+    @staticmethod
+    def _sensor_salt(sensor):
+        # Stable cross-process string hash (avoid Python's randomized hash()).
+        if sensor is None:
+            return 0
+        s = str(sensor)
+        h = 2166136261
+        for ch in s:
+            h ^= ord(ch)
+            h = (h * 16777619) & 0xFFFFFFFF
+        return h
 
     def __call__(self, data_dict):
         if "point_cloud" not in data_dict:
@@ -457,6 +480,17 @@ class PointSubsampleDetection(object):
             )
             return data_dict
         replace = n < self.num_points
-        choices = np.random.choice(n, self.num_points, replace=replace)
+        if self.deterministic:
+            sample_index = int(data_dict.get(self.index_key, 0))
+            sensor = data_dict.get(self.sensor_key, None)
+            local_seed = (
+                self.seed
+                + sample_index
+                + self._sensor_salt(sensor)
+            ) & 0xFFFFFFFF
+            rng = np.random.default_rng(local_seed)
+            choices = rng.choice(n, self.num_points, replace=replace)
+        else:
+            choices = np.random.choice(n, self.num_points, replace=replace)
         data_dict["point_cloud"] = pc[choices]
         return data_dict
