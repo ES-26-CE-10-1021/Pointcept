@@ -1203,11 +1203,16 @@ class CombinedSegDetEvaluator(HookBase):
             metrics = ap_calculator.compute_metrics()
             ap25 = metrics[0.25]["mAP"] * 100
             ap50 = metrics[0.5]["mAP"] * 100
+            ar25 = metrics[0.25].get("AR", float("nan")) * 100
+            ar50 = metrics[0.5].get("AR", float("nan")) * 100
 
             self.trainer.logger.info(
                 "Val result: loss/AP25/AP50 {:.4f}/{:.2f}/{:.2f}".format(
                     loss_avg, ap25, ap50
                 )
+            )
+            self.trainer.logger.info(
+                "Val result: AR25/AR50 {:.2f}/{:.2f}".format(ar25, ar50)
             )
             self.trainer.logger.info(
                 "Val result: mIoU/mAcc/allAcc {:.4f}/{:.4f}/{:.4f}".format(
@@ -1221,12 +1226,26 @@ class CombinedSegDetEvaluator(HookBase):
                         float(acc_class[cls_id]),
                     )
                 )
+            for cls_name in class_names:
+                ap_key = "{} Average Precision".format(cls_name)
+                rec_key = "{} Recall".format(cls_name)
+                ap25_cls = metrics[0.25].get(ap_key, float("nan")) * 100
+                ap50_cls = metrics[0.5].get(ap_key, float("nan")) * 100
+                rec25_cls = metrics[0.25].get(rec_key, float("nan")) * 100
+                rec50_cls = metrics[0.5].get(rec_key, float("nan")) * 100
+                self.trainer.logger.info(
+                    "  det {:20s}: AP25={:.2f}  AP50={:.2f}  Rec25={:.2f}  Rec50={:.2f}".format(
+                        cls_name, ap25_cls, ap50_cls, rec25_cls, rec50_cls
+                    )
+                )
 
             current_epoch = self.trainer.epoch + 1
             if self.trainer.writer is not None:
                 self.trainer.writer.add_scalar("val/loss", loss_avg, current_epoch)
                 self.trainer.writer.add_scalar("val/AP25", ap25, current_epoch)
                 self.trainer.writer.add_scalar("val/AP50", ap50, current_epoch)
+                self.trainer.writer.add_scalar("val/AR25", ar25, current_epoch)
+                self.trainer.writer.add_scalar("val/AR50", ar50, current_epoch)
                 self.trainer.writer.add_scalar("val/mIoU", m_iou, current_epoch)
                 self.trainer.writer.add_scalar("val/mAcc", m_acc, current_epoch)
                 self.trainer.writer.add_scalar("val/allAcc", all_acc, current_epoch)
@@ -1239,11 +1258,18 @@ class CombinedSegDetEvaluator(HookBase):
                     )
                 for cls_name in class_names:
                     ap_key = "{} Average Precision".format(cls_name)
+                    rec_key = "{} Recall".format(cls_name)
                     self.trainer.writer.add_scalar(
                         "val_finegrained/AP25_{}".format(cls_name), metrics[0.25].get(ap_key, float("nan")) * 100, current_epoch
                     )
                     self.trainer.writer.add_scalar(
                         "val_finegrained/AP50_{}".format(cls_name), metrics[0.5].get(ap_key, float("nan")) * 100, current_epoch
+                    )
+                    self.trainer.writer.add_scalar(
+                        "val_finegrained/Rec25_{}".format(cls_name), metrics[0.25].get(rec_key, float("nan")) * 100, current_epoch
+                    )
+                    self.trainer.writer.add_scalar(
+                        "val_finegrained/Rec50_{}".format(cls_name), metrics[0.5].get(rec_key, float("nan")) * 100, current_epoch
                     )
                 if self.trainer.cfg.enable_wandb:
                     wandb_dict = {
@@ -1251,6 +1277,8 @@ class CombinedSegDetEvaluator(HookBase):
                         "val/loss": loss_avg,
                         "val/AP25": ap25,
                         "val/AP50": ap50,
+                        "val/AR25": ar25,
+                        "val/AR50": ar50,
                         "val/mIoU": m_iou,
                         "val/mAcc": m_acc,
                         "val/allAcc": all_acc,
@@ -1260,8 +1288,11 @@ class CombinedSegDetEvaluator(HookBase):
                         wandb_dict["val_finegrained/OA_{}".format(name)] = float(acc_class[cls_id])
                     for cls_name in class_names:
                         ap_key = "{} Average Precision".format(cls_name)
+                        rec_key = "{} Recall".format(cls_name)
                         wandb_dict["val_finegrained/AP25_{}".format(cls_name)] = metrics[0.25].get(ap_key, float("nan")) * 100
                         wandb_dict["val_finegrained/AP50_{}".format(cls_name)] = metrics[0.5].get(ap_key, float("nan")) * 100
+                        wandb_dict["val_finegrained/Rec25_{}".format(cls_name)] = metrics[0.25].get(rec_key, float("nan")) * 100
+                        wandb_dict["val_finegrained/Rec50_{}".format(cls_name)] = metrics[0.5].get(rec_key, float("nan")) * 100
                     wandb.log(wandb_dict, step=wandb.run.step)
 
             # Surface uncertainty σ values when the model uses learnable
