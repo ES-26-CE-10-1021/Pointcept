@@ -1230,19 +1230,39 @@ class CombinedSegDetEvaluator(HookBase):
                 self.trainer.writer.add_scalar("val/mIoU", m_iou, current_epoch)
                 self.trainer.writer.add_scalar("val/mAcc", m_acc, current_epoch)
                 self.trainer.writer.add_scalar("val/allAcc", all_acc, current_epoch)
-                if self.trainer.cfg.enable_wandb:
-                    wandb.log(
-                        {
-                            "Epoch": current_epoch,
-                            "val/loss": loss_avg,
-                            "val/AP25": ap25,
-                            "val/AP50": ap50,
-                            "val/mIoU": m_iou,
-                            "val/mAcc": m_acc,
-                            "val/allAcc": all_acc,
-                        },
-                        step=wandb.run.step,
+                for cls_id, name in enumerate(seg_names[:seg_num_classes]):
+                    self.trainer.writer.add_scalar(
+                        "val_finegrained/IoU_{}".format(name), float(iou_class[cls_id]), current_epoch
                     )
+                    self.trainer.writer.add_scalar(
+                        "val_finegrained/OA_{}".format(name), float(acc_class[cls_id]), current_epoch
+                    )
+                for cls_name in class_names:
+                    ap_key = "{} Average Precision".format(cls_name)
+                    self.trainer.writer.add_scalar(
+                        "val_finegrained/AP25_{}".format(cls_name), metrics[0.25].get(ap_key, float("nan")) * 100, current_epoch
+                    )
+                    self.trainer.writer.add_scalar(
+                        "val_finegrained/AP50_{}".format(cls_name), metrics[0.5].get(ap_key, float("nan")) * 100, current_epoch
+                    )
+                if self.trainer.cfg.enable_wandb:
+                    wandb_dict = {
+                        "Epoch": current_epoch,
+                        "val/loss": loss_avg,
+                        "val/AP25": ap25,
+                        "val/AP50": ap50,
+                        "val/mIoU": m_iou,
+                        "val/mAcc": m_acc,
+                        "val/allAcc": all_acc,
+                    }
+                    for cls_id, name in enumerate(seg_names[:seg_num_classes]):
+                        wandb_dict["val_finegrained/IoU_{}".format(name)] = float(iou_class[cls_id])
+                        wandb_dict["val_finegrained/OA_{}".format(name)] = float(acc_class[cls_id])
+                    for cls_name in class_names:
+                        ap_key = "{} Average Precision".format(cls_name)
+                        wandb_dict["val_finegrained/AP25_{}".format(cls_name)] = metrics[0.25].get(ap_key, float("nan")) * 100
+                        wandb_dict["val_finegrained/AP50_{}".format(cls_name)] = metrics[0.5].get(ap_key, float("nan")) * 100
+                    wandb.log(wandb_dict, step=wandb.run.step)
 
             # Surface uncertainty σ values when the model uses learnable
             # multi-task weighting. Read from the unwrapped (DDP-unaware)

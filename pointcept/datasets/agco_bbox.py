@@ -277,6 +277,7 @@ class AgcoBBoxV1(Dataset):
         debug_roundtrip_check: bool = False,
         load_segment: bool = False,
         segment_subdir: str = "segment",
+        seg_label_map: dict | None = None,
     ):
         assert split in ("train", "val", "test"), f"Unknown split: {split}"
         assert len(sensors) > 0, "At least one sensor must be specified"
@@ -317,6 +318,7 @@ class AgcoBBoxV1(Dataset):
         self.debug_roundtrip_check = bool(debug_roundtrip_check)
         self.load_segment = bool(load_segment)
         self.segment_subdir = str(segment_subdir)
+        self.seg_label_map = dict(seg_label_map) if seg_label_map is not None else None
         self.center_normalizing_range = [
             np.zeros((1, 3), dtype=np.float32),
             np.ones((1, 3), dtype=np.float32),
@@ -468,6 +470,9 @@ class AgcoBBoxV1(Dataset):
                     f"Segment label count ({segment.shape[0]}) does not match "
                     f"point count ({point_cloud.shape[0]}) for {seg_path}."
                 )
+            if self.seg_label_map is not None:
+                for src, dst in self.seg_label_map.items():
+                    segment[segment == src] = dst
         centers_raw, sizes_raw, quats_xyzw, labels_raw = self._load_boxes(
             abs_root, sensor, ts
         )

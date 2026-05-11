@@ -2050,6 +2050,25 @@ class CombinedSegDetTester(TesterBase):
                     )
                 )
 
+            if self.cfg.enable_wandb:
+                import wandb
+                if wandb.run is not None:
+                    wandb_dict = {
+                        "test/AP25": ap25,
+                        "test/AP50": ap50,
+                        "test/mIoU": m_iou,
+                        "test/mAcc": m_acc,
+                        "test/allAcc": all_acc,
+                    }
+                    for cls_id, name in enumerate(seg_names[:seg_num_classes]):
+                        wandb_dict["test_finegrained/IoU_{}".format(name)] = float(iou_class[cls_id])
+                        wandb_dict["test_finegrained/OA_{}".format(name)] = float(acc_class[cls_id])
+                    for cls_name in class_names:
+                        ap_key = "{} Average Precision".format(cls_name)
+                        wandb_dict["test_finegrained/AP25_{}".format(cls_name)] = metrics[0.25].get(ap_key, float("nan")) * 100
+                        wandb_dict["test_finegrained/AP50_{}".format(cls_name)] = metrics[0.5].get(ap_key, float("nan")) * 100
+                    wandb.log(wandb_dict)
+
             logger.info(
                 "<<<<<<<<<<<<<<<<< End Multi-Task Evaluation <<<<<<<<<<<<<<<<<"
             )

@@ -169,7 +169,7 @@ eval_epoch = 20
 optimizer = dict(type="AdamW", lr=5e-4, weight_decay=0.1)
 scheduler = dict(
     type="OneCycleLR",
-    max_lr=[5e-4],
+    max_lr=[5e-4, 5e-4],  # one entry per param_group (default + log_sigma_sq)
     pct_start=0.05,
     anneal_strategy="cos",
     div_factor=500.0,

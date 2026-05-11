@@ -1,28 +1,12 @@
 """
-Multi-task PTv3 + 3DETR on AGCO (semseg + detection).
+Multi-task PTv3 + 3DETR on AGCO — overfitting variant (train split for all).
 
-Architecture: ``MultiTask3DETRSegmentor`` — full PT-v3m1 U-Net backbone (encoder
-+ decoder), semseg head reads the unpooled decoder output, 3DETR detection
-branch (Identity transformer encoder + 3DETR decoder) taps the encoder
-bottleneck.
-
-Dataset: ``AgcoBBoxV1(load_segment=True, segment_subdir="segment")``.
-Per-point semantic labels live at ``<root>/<sensor>/segment/<ts>.npy``
-(uint16; cast to int64 by the dataset). On-disk class index space:
-
-    0 = background
-    1 = tractor
-    2 = harvester
-    3 = trailer
-    4 = car   ← remapped to background (0) via seg_label_map
-    (hopper is detection-only, never appears in segment files)
-
-Semseg and detection share the same foreground classes (tractor, harvester,
-trailer). Car and hopper are excluded from semseg; car points are collapsed
-into background at load time.
+Identical to multitask-3detr-ptv3-v0m1-0-agco.py except val and test both
+point at the train split. Use this to verify the model can overfit before
+committing to a full training run.
 
 Usage:
-    sh scripts/train.sh -d agco -c multitask-3detr-ptv3-v0m1-0-agco -n my_multitask -g 2
+    sh scripts/train.sh -d agco -c multitask-3detr-ptv3-v0m1-1-agco -n my_multitask_overfitting -g 2
 """
 
 _base_ = ["../_base_/default_runtime.py"]
@@ -130,8 +114,6 @@ model = dict(
     position_embedding="fourier",
     mlp_dropout=0.3,
     projection_norm="ln",
-    # Multi-task loss weighting — uncertainty (Cipolla, c_i=2) by default.
-    # Switch to "fixed" + seg_weight/det_weight for ablation.
     loss_weighting="uncertainty",
     c_seg=2.0,
     c_det=2.0,
@@ -139,8 +121,6 @@ model = dict(
     det_weight=1.0,
 )
 
-# Exclude the learnable σ params from weight decay (scale parameters, not
-# weights). Substring match via pointcept/utils/optimizer.py:23.
 param_dicts = [dict(keyword="log_sigma_sq", weight_decay=0.0)]
 
 # ── Schedule ─────────────────────────────────────────────────────────────────
@@ -177,6 +157,7 @@ _dataset_kwargs = dict(
     type=dataset_type,
     root_dir=data_root,
     meta_data_dir=meta_data_dir,
+    split="train",
     split_prefix="agco",
     sensors=sensors,
     use_intensity=False,
@@ -201,7 +182,6 @@ data = dict(
     names=seg_class_names,
     train=dict(
         **_dataset_kwargs,
-        split="train",
         loop=1,
         transform=[
             *det_crop_transforms,
@@ -213,7 +193,6 @@ data = dict(
     ),
     val=dict(
         **_dataset_kwargs,
-        split="val",
         transform=[
             *det_crop_transforms,
             dict(type="GridSampleDetection", grid_size=0.05),
@@ -222,7 +201,6 @@ data = dict(
     ),
     test=dict(
         **_dataset_kwargs,
-        split="test",
         transform=[
             *det_crop_transforms,
             dict(type="GridSampleDetection", grid_size=0.05),
