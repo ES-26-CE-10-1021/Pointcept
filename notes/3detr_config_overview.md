@@ -1,36 +1,15 @@
 # 3DETR Config Overview
 
-ScanNet 3DETR configs live in `configs/scannet/det-3detr-*.py` (18-class,
-axis-aligned boxes). AGCO configs mirror the same naming under
-`configs/agco/det-3detr-*.py` but use the `AgcoBBoxV1` dataset +
-`AgcoBBoxConfig` (4 classes — hopper, tractor, harvester, trailer — with
-oriented boxes encoded via `num_angle_bin=12`, SUN-RGBD-style).
+This note is split by dataset:
 
-| AGCO config | Pre-Encoder | Encoder | Notes |
-|-------------|-------------|---------|-------|
-| **v0m1-0**  | PointNet++ SA (2048 pts) | VanillaTransformer (3L) | Baseline on AGCO. num_queries=128, num_angle_bin=12 |
+- **ScanNet configs**: `configs/scannet/det-3detr-*.py`
+- **AGCO configs**: `configs/agco/det-3detr-*.py`
 
-**AgcoBBoxV1 dataset kwargs** (set in `configs/agco/det-3detr-v0m1-0-agco.py`):
-`min_inliers=67` filters parent bboxes; their `children` are kept iff the parent passes.
-`apply_r_level_to_points=True` and `apply_r_level_to_boxes=True` apply `R_level` from
-`gravity_align.npz` to the cloud and to box centers/quats respectively (defaults are
-`False` to match the visualizer's flag defaults). `apply_t_rtk=True` (with
-`require_calibration` controlling strictness) applies the per-sensor T_rtk from each
-root's `calibration.yml` before R_level.
+## ScanNet dataset configs
 
-**Augmentation** is config-driven via a `transform=[...]` list (Pointcept-style).
-Detection-aware transforms registered in `pointcept/datasets/det_transform.py`:
-
-| Transform                  | Knobs                                                             |
-|----------------------------|-------------------------------------------------------------------|
-| `RandomFlipDetection`      | `p_x`, `p_y` — independent X/Y mirror; updates centers + yaws.     |
-| `RandomRotateZDetection`   | `angle_deg=(lo, hi)` in degrees; rotates points + centers + yaws.  |
-| `RandomScaleDetection`     | `scale=(lo, hi)`, `apply_to_sizes=True`.                           |
-| `RandomJitterDetection`    | `sigma`, `clip` — Gaussian jitter on point XYZ only.               |
-| `RandomCuboidDetection`    | `min_points`, `aspect`, `min_crop`, `max_crop`; filters boxes.     |
-| `PointSubsampleDetection`  | `num_points` — fixed-size subsample; dataset enforces as fallback. |
-
-Legacy `augment` and `random_cuboid_min_points` kwargs were removed.
+ScanNet 3DETR configs are 18-class detection with axis-aligned boxes and use
+the `ScanNetDetectionDataset` dataloader (`pointcept/datasets/scannet_detection.py`,
+VoteNet-style preprocessed layout).
 
 ## Config summary
 
@@ -205,3 +184,92 @@ All configs share these settings (matching native 3DETR where applicable):
 
 - **Variable-length path** (v2, v3m1-0, v4m1-0, v4m1-1, utonia-v1m1-0, utonia-v2m1-0, utonia-v3m1-0, utonia-v5m1-0, utonia-v5m2-0): padding_mask + LN projection
 - **Fixed-length path** (v0, v1, v3m1-1, utonia-v4m1-0, utonia-v5m1-1, utonia-v5m2-1): no padding needed
+
+## AGCO dataset configs
+
+AGCO detection configs use `AgcoBBoxV1` + `AgcoBBoxConfig` (oriented boxes,
+`num_angle_bin=12`) and vary mostly by dataset/runtime/criterion knobs rather
+than by major model-composition changes.
+
+### AGCO config families
+
+| Family | Core idea | Typical configs |
+|---|---|---|
+| `v0/v1` | Base 3DETR stack (PointNet++ SA + vanilla encoder) | `v0m1-*`, `v1m1-*`, `v1m2-*`, `v1m3-*` |
+| `v3` | PTv3 pre-encoder + identity/vanilla encoder | `v3m1-*`, `v3m2-*` |
+| `v4` | AGCO-focused PTv3 settings (normalized center offsets, query sweeps, fixed dims) | `v4m1-*`, `v4m2-*`, `v4m3-*` |
+| `*-ouster` | Sensor-specific ouster runs (40k points) | all `*-ouster` |
+| `*-1` | Overfit/debug split behavior (`val/test -> train`) | `*m*-1*` |
+| `*tiny5` | 5-sample deterministic overfit diagnostics via allowlist | `*tiny5*` |
+
+### AGCO settings that matter most
+
+1. **Class subset + label mapping**
+- `included_classes=(...)` defines active classes and their order.
+- Common modern setting is 3-class: `("tractor", "harvester", "trailer")`.
+- Boxes outside `included_classes` are dropped at dataset load time.
+
+2. **Oriented-box parameterization**
+- `num_angle_bin=12` (SUN-RGBD style angle cls+residual) for AGCO.
+- Not axis-aligned ScanNet-style detection.
+
+3. **Coordinate/calibration stack (AGCO-specific)**
+- `apply_t_rtk=True` + `require_calibration=True`: sensor->RTK transform.
+- `apply_r_global=True`: apply global pitch/roll component.
+- `apply_r_level_to_points=True`, `apply_r_level_to_boxes=True`:
+  gravity leveling from `gravity_align.npz`.
+- `require_gravity_align=True` to enforce leveling assets.
+
+4. **Consistent normalization bounds**
+- `fixed_pc_dims={...}` stabilizes center/size normalization across scenes.
+
+5. **Sensor-specific dataset geometry**
+- `sensors=["lslidar"]` or `sensors=["ouster"]`.
+- Typical points: `100_000` (lslidar) vs `40_000` (ouster).
+
+6. **Detection crop policy**
+- Common deterministic crop pair:
+  - `FovCropDetection(azimuth_deg=(-60, 60), crop_points=True)`
+  - `SphericalCropDetection(max_dist/min_dist, per_sensor=...)`
+
+7. **Center prediction parameterization**
+- `center_offset_normalized=True` in newer AGCO configs.
+
+8. **Query budget sweeps**
+- AGCO experiments vary `num_queries` (e.g. `32`, `128`, `384`).
+
+9. **Criterion/matcher variants**
+- AGCO defaults: often `loss_giou_weight=1`, matcher center/objectness cost 0.
+- SUN-like variants (`v1m3`) use matcher `{class=1, giou=3, center=5, objectness=5}`,
+  with `loss_giou_weight=0` and `loss_no_object_weight=0.1`.
+
+10. **GIoU execution mode**
+- `SetCriterion3DETR` supports:
+  - `giou_mode="optimized"` (split fast path)
+  - `giou_mode="legacy"` (pre-optimization criterion flow, final `[-1,1]` clamp)
+
+11. **Overfit/debug behavior**
+- `*-1` configs set `val/test split="train"` for overfit checks.
+- `tiny5` configs use `split_prefix="agco_tiny5"` + `sample_allowlist_file=...`.
+
+### AGCO-specific dataset knobs (`AgcoBBoxV1`)
+
+- `min_inliers` can be global int or per-sensor dict.
+- `max_num_obj` is often reduced (e.g. 16) for AGCO scene density.
+- `sample_allowlist_file` enables exact per-sample subset selection (tiny5).
+- `deterministic_debug` / `deterministic_seed` exist in dataset safety-net path.
+
+### AGCO detection transforms
+
+| Transform | Main knobs |
+|---|---|
+| `FovCropDetection` | `azimuth_deg`, `elevation_deg`, `crop_points`, `per_sensor` |
+| `SphericalCropDetection` | `max_dist`, `min_dist`, `per_sensor` |
+| `RandomFlipDetection` | `p_x`, `p_y` |
+| `RandomRotateZDetection` | `angle_deg=(lo, hi)` |
+| `PointSubsampleDetection` | `num_points` (+ optional deterministic mode) |
+| `RandomScaleDetection` | `scale=(lo,hi)`, `apply_to_sizes=True` |
+| `RandomJitterDetection` | `sigma`, `clip` |
+| `RandomCuboidDetection` | `min_points`, `aspect`, `min_crop`, `max_crop` |
+
+Legacy `augment` and `random_cuboid_min_points` kwargs were removed.
