@@ -1,5 +1,5 @@
 """
-3DETR on AGCO — v3m2-1-3cls-agco: overfit config mimicking v1m2-1 settings with PTv3 model architecture.
+3DETR on AGCO — v3m2-0-3cls-agco-ouster: base config mimicking v1m2-0 settings with PTv3 model architecture.
 
 Design:
   - Base 3DETR model stack from det-3detr-v1m1-0-agco:
@@ -9,7 +9,7 @@ Design:
       num_queries=32, giou_on_aux_outputs=False, ouster + 40k points.
 
 Usage:
-  sh scripts/train.sh -d agco -c det-3detr-v3m2-1-3cls-agco -n det-3detr-v3m2-1-3cls-agco -g 2
+  sh scripts/train.sh -d agco -c det-3detr-v3m2-0-3cls-agco-ouster -n det-3detr-v3m2-0-3cls-agco-ouster -g 2
 """
 
 _base_ = ["../_base_/default_runtime.py"]
@@ -125,8 +125,8 @@ scheduler = dict(
 dataset_type = "AgcoBBoxV1"
 data_root = "/mnt/data/pointcloud_datasets/Pointcept/agco2026"
 meta_data_dir = "/mnt/data/pointcloud_datasets/Pointcept/agco2026/meta_data"
-sensors = ["lslidar"]
-num_points = 100_000
+sensors = ["ouster"]
+num_points = 40_000
 
 class_names = list(included_classes)
 min_inliers = dict(lslidar=350, ouster=200, rslidar=80)
@@ -194,7 +194,7 @@ data = dict(
         type=dataset_type,
         root_dir=data_root,
         meta_data_dir=meta_data_dir,
-        split="train",
+        split="val",
         split_prefix="agco",
         sensors=sensors,
         use_intensity=False,
@@ -219,7 +219,7 @@ data = dict(
         type=dataset_type,
         root_dir=data_root,
         meta_data_dir=meta_data_dir,
-        split="train",
+        split="test",
         split_prefix="agco",
         sensors=sensors,
         use_intensity=False,

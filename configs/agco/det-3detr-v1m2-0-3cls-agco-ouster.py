@@ -15,13 +15,13 @@ Usage:
 _base_ = ["../_base_/default_runtime.py"]
 
 # -- Training -----------------------------------------------------------------
-batch_size = 4
+batch_size = 8
 num_worker = 16
 mix_prob = 0
 enable_amp = False
 find_unused_parameters = False
 clip_grad = 1.0
-gradient_accumulation_steps = 2
+gradient_accumulation_steps = 1
 
 included_classes = ("tractor", "harvester", "trailer")
 num_semcls = len(included_classes)
