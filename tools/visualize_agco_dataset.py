@@ -11,6 +11,7 @@ Controls:
     [←]     : Load previous sample
     [P/Space] : Toggle Play/Pause video mode
     [R]     : Reload current sample (see different augmentations)
+    [F]     : Print current sample line for tiny5 allowlist
     [1-9]   : Scrub dataset (1=Start, 5=Middle, 9=End)
     [Q]     : Quit
 """
@@ -303,6 +304,7 @@ class DatasetViewer:
         self.vis.register_key_callback(80, self.toggle_play)
         self.vis.register_key_callback(82, self.reload_sample)
         self.vis.register_key_callback(81, self.quit)
+        self.vis.register_key_callback(70, self.print_sample_for_tiny5)
         
         def make_scrub_callback(fraction):
             def callback(vis=None):
@@ -333,6 +335,7 @@ class DatasetViewer:
         print("[←]     : Previous frame")
         print("[P/Space]: Toggle Play/Pause")
         print("[R]     : Reload current sample (see different augmentations)")
+        print("[F]     : Print current sample in tiny5 format")
         print("[1-9]   : Scrub dataset (1=Start, 5=Middle, 9=End)")
         print("[Q]     : Quit")
         print("-----------------------")
@@ -473,6 +476,54 @@ class DatasetViewer:
         print("Exiting viewer.")
         self.vis.destroy_window()
         sys.exit(0)
+        return False
+
+    def _get_underlying_dataset_and_index(self):
+        """Resolve wrapped dataset index to underlying AgcoBBoxV1 index."""
+        ds = self.dataset
+        idx = self.current_idx
+        if hasattr(ds, "indices") and hasattr(ds, "dataset"):
+            # PerSensorSubset wrapper
+            idx = ds.indices[idx]
+            ds = ds.dataset
+        return ds, idx
+
+    def print_sample_for_tiny5(self, vis=None):
+        """Print current sample as a CSV line for tiny5 allowlist files.
+
+        Format:
+            static_2/full_split/,<sensor>,<timestamp>
+        """
+        try:
+            ds, idx = self._get_underlying_dataset_and_index()
+            if not hasattr(ds, "samples") or not hasattr(ds, "roots"):
+                print("[tiny5] Sample printing is only supported in dataset mode.")
+                return False
+
+            ridx, sensor, ts = ds.samples[idx]
+            root_abs = os.path.normpath(ds.roots[ridx])
+            target = os.path.normpath("static_2/full_split")
+            rel_root = "static_2/full_split/"
+
+            # If the selected root is not the requested one, warn and still print
+            # the actual root-relative line as a fallback.
+            if target not in root_abs.replace("\\", "/"):
+                try:
+                    rel_to_root_dir = os.path.relpath(root_abs, ds.root_dir).replace("\\", "/")
+                    if not rel_to_root_dir.endswith("/"):
+                        rel_to_root_dir += "/"
+                    print(
+                        f"[tiny5] NOTE: current sample root is '{rel_to_root_dir}', not 'static_2/full_split/'"
+                    )
+                    rel_root = rel_to_root_dir
+                except Exception:
+                    pass
+
+            line = f"{rel_root},{sensor},{ts}"
+            print("[tiny5] paste into sample allowlist:")
+            print(line)
+        except Exception as e:
+            print(f"[tiny5] Failed to print sample line: {e}")
         return False
 
     def run(self):

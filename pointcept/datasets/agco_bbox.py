@@ -42,6 +42,7 @@ line (relative to `root_dir`).
 import json
 import os
 import warnings
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -292,6 +293,8 @@ class AgcoBBoxV1(Dataset):
         deterministic_seed: int = 0,
         debug_roundtrip_check: bool = False,
         max_num_obj: int = 64,
+        sample_allowlist_file: str = None,
+        sample_allowlist_mode: str = "exact",
     ):
         assert split in ("train", "val", "test"), f"Unknown split: {split}"
         assert len(sensors) > 0, "At least one sensor must be specified"
@@ -362,10 +365,17 @@ class AgcoBBoxV1(Dataset):
         self.deterministic_debug = bool(deterministic_debug)
         self.deterministic_seed = int(deterministic_seed)
         self.debug_roundtrip_check = bool(debug_roundtrip_check)
+        self.sample_allowlist_file = sample_allowlist_file
+        self.sample_allowlist_mode = str(sample_allowlist_mode)
         self.center_normalizing_range = [
             np.zeros((1, 3), dtype=np.float32),
             np.ones((1, 3), dtype=np.float32),
         ]
+        if self.sample_allowlist_mode != "exact":
+            raise ValueError(
+                f"Unsupported sample_allowlist_mode='{self.sample_allowlist_mode}'. "
+                "Only 'exact' is supported."
+            )
 
         split_file = os.path.join(meta_data_dir, f"{split_prefix}_{split}.txt")
         with open(split_file, "r") as f:
@@ -424,6 +434,13 @@ class AgcoBBoxV1(Dataset):
 
         n_total = len(self.samples)
 
+        if self.sample_allowlist_file:
+            self.samples = self._filter_samples_with_allowlist(self.samples)
+            print(
+                f"[AgcoBBoxV1] {split}: allowlist kept {len(self.samples)} / {n_total} samples"
+            )
+            n_total = len(self.samples)
+
         if self.nonempty_oversample > 1.0 and n_total > 0:
             empty_samples = []
             nonempty_samples = []
@@ -452,6 +469,75 @@ class AgcoBBoxV1(Dataset):
 
     def __len__(self):
         return len(self.samples) * self.loop
+
+    def _normalize_root_path(self, root_str: str) -> str:
+        root_str = root_str.strip()
+        if not root_str:
+            return root_str
+        p = Path(root_str)
+        if not p.is_absolute():
+            p = Path(self.root_dir) / p
+        return str(p.resolve())
+
+    def _load_sample_allowlist(self):
+        path = Path(self.sample_allowlist_file)
+        if not path.is_absolute():
+            path = Path(self.meta_data_dir) / path
+        if not path.is_file():
+            raise FileNotFoundError(
+                f"sample_allowlist_file not found: {path}"
+            )
+
+        allow = set()
+        malformed = 0
+        with open(path, "r") as f:
+            for line_no, raw in enumerate(f, start=1):
+                line = raw.strip()
+                if not line or line.startswith("#"):
+                    continue
+                parts = [x.strip() for x in line.split(",")]
+                if len(parts) != 3:
+                    malformed += 1
+                    continue
+                root_str, sensor, ts = parts
+                allow.add((self._normalize_root_path(root_str), sensor, ts))
+
+        if malformed > 0:
+            warnings.warn(
+                f"{path}: ignored {malformed} malformed allowlist lines; expected '<root>,<sensor>,<timestamp>'",
+                stacklevel=2,
+            )
+
+        if len(allow) == 0:
+            raise ValueError(
+                f"sample_allowlist_file {path} produced an empty allowlist"
+            )
+        return allow, str(path)
+
+    def _filter_samples_with_allowlist(self, samples):
+        allow, allow_path = self._load_sample_allowlist()
+
+        filtered = []
+        seen = set()
+        for ridx, sensor, ts in samples:
+            key = (str(Path(self.roots[ridx]).resolve()), sensor, ts)
+            if key in allow:
+                filtered.append((ridx, sensor, ts))
+                seen.add(key)
+
+        missing = len(allow - seen)
+        if missing > 0:
+            warnings.warn(
+                f"{allow_path}: {missing} allowlist entries did not match any sample",
+                stacklevel=2,
+            )
+
+        if len(filtered) == 0:
+            raise ValueError(
+                f"No samples matched allowlist in {allow_path}. "
+                "Check root paths, sensor names, and timestamps."
+            )
+        return filtered
 
     # ------------------------------------------------------------------
 
