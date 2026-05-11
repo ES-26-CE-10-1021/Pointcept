@@ -85,7 +85,6 @@ model = dict(
         type="AgcoBBoxConfig",
         num_angle_bin=num_angle_bin,
         included_classes=included_classes,
-        max_num_obj=max_num_obj,
     ),
     encoder_dim=512,
     decoder_dim=256,

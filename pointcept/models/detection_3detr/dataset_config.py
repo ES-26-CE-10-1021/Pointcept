@@ -165,14 +165,9 @@ class AgcoBBoxConfig:
 
     _ALL_CLASSES = ("tractor", "harvester", "trailer", "car", "hopper")
 
-    def __init__(
-        self,
-        num_angle_bin: int = 12,
-        included_classes=None,
-        max_num_obj: int = 64,
-    ):
+    def __init__(self, num_angle_bin: int = 12, included_classes=None):
         self.num_angle_bin = int(num_angle_bin)
-        self.max_num_obj = int(max_num_obj)
+        self.max_num_obj = 64
 
         included = tuple(
             included_classes if included_classes is not None else self._ALL_CLASSES
