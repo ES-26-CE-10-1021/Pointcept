@@ -250,11 +250,11 @@ class SetCriterion3DETR(nn.Module):
         return {"loss_center": center_loss}
 
     def _loss_giou(self, outputs, targets, assignments):
-        gious_dist = 1 - outputs["gious"]
-        giou_loss = torch.gather(
-            gious_dist, 2, assignments["per_prop_gt_inds"].unsqueeze(-1)
-        ).squeeze(-1)
-        giou_loss = giou_loss * assignments["proposal_matched_mask"]
+        # `gious_matched` is (B, K1), already evaluated at the matcher-assigned
+        # GT for every proposal (with grad). For rotated boxes that compute is
+        # ~K2× cheaper than the full (B, K1, K2) grid the matcher uses.
+        gious_matched = outputs["gious_matched"]
+        giou_loss = (1 - gious_matched) * assignments["proposal_matched_mask"]
         giou_loss = giou_loss.sum()
         if targets["num_boxes"] > 0:
             giou_loss /= targets["num_boxes"]
@@ -295,25 +295,14 @@ class SetCriterion3DETR(nn.Module):
         """
         return self.num_angle_bin > 1
 
-    def single_output_forward(self, outputs, targets):
-        gious = generalized_box3d_iou(
-            outputs["box_corners"],
-            targets["gt_box_corners"],
-            targets["nactual_gt"],
-            rotated_boxes=self._use_rotated_boxes(),
-            needs_grad=(self._loss_weight_dict.get("loss_giou_weight", 0) > 0),
-        )
+    def _sanitize_gious(self, gious, outputs, targets, tag):
+        """Detect NaN/Inf/out-of-range GIoU, log, then nan_to_num + clamp.
 
-        # ── GIoU sanity check + sanitise + clamp ─────────────────────────────
-        # GIoU ∈ [-1, 1] by construction.  Values outside that range, or
-        # non-finite values, signal a geometry failure in the polygon
-        # intersection code.  Root-cause fixes live in box_util.py
-        # (signed-distance parametric clipping + footprint-area physical
-        # clamp).  The block below is the final safety net.
-        #
-        # NaN/Inf detection: evaluate finite and out-of-range separately so
-        # we still get meaningful min/max from the finite elements even when
-        # some entries are NaN or Inf.
+        GIoU ∈ [-1, 1] by construction. Values outside that range or
+        non-finite values signal a geometry failure in the polygon
+        intersection code. Root-cause fixes live in box_util.py; this is
+        the final safety net.
+        """
         _GIOU_TOL = 1e-4
         finite_mask = gious.isfinite()
         num_nan = int(gious.isnan().sum())
@@ -334,12 +323,13 @@ class SetCriterion3DETR(nn.Module):
             n = self._giou_anomaly_count
             if n == 1 or n % 100 == 0:
                 logger.warning(
-                    "GIoU anomaly #%d: finite min=%.4g max=%.4g "
+                    "GIoU anomaly #%d (%s): finite min=%.4g max=%.4g "
                     "nan=%d +inf=%d -inf=%d. "
                     "pred_angles_deg=[%.1f, %.1f]  "
                     "gt_angles_deg=[%.1f, %.1f]. "
                     "Sanitising with nan_to_num then clamp(-1, 1).",
                     n,
+                    tag,
                     gious_min,
                     gious_max,
                     num_nan,
@@ -353,13 +343,73 @@ class SetCriterion3DETR(nn.Module):
 
         # nan_to_num first: clamp(-1, 1) passes NaNs through unchanged.
         gious = torch.nan_to_num(gious, nan=-1.0, posinf=1.0, neginf=-1.0)
-        gious = gious.clamp(-1.0, 1.0)
-        outputs["gious"] = gious
+        return gious.clamp(-1.0, 1.0)
+
+    def single_output_forward(self, outputs, targets):
+        # ── Matcher-side GIoU: full (B, K1, K2) grid, NO grad ───────────────
+        # With needs_grad=False this uses the cythonized box_intersection
+        # (single batched C call), which is ~K2× faster than the JIT path
+        # for rotated boxes. The matcher only consumes .detach()-ed gious
+        # via the cost matrix, so dropping grad here is exact, not an
+        # approximation.
+        with torch.no_grad():
+            gious_full = generalized_box3d_iou(
+                outputs["box_corners"],
+                targets["gt_box_corners"],
+                targets["nactual_gt"],
+                rotated_boxes=self._use_rotated_boxes(),
+                needs_grad=False,
+            )
+        gious_full = self._sanitize_gious(gious_full, outputs, targets, tag="matcher")
+        outputs["gious"] = gious_full
+
         center_dist = torch.cdist(
             outputs["center_normalized"], targets["gt_box_centers_normalized"], p=1
         )
         outputs["center_dist"] = center_dist
         assignments = self.matcher(outputs, targets)
+
+        # ── Loss-side GIoU: only matched (prop, gt) pairs, WITH grad ────────
+        # The full (B, K1, K2) JIT computation runs the Sutherland-Hodgman
+        # polygon clip in a Python loop over every pair; for rotated boxes
+        # that's the dominant cost. We only need GIoU at the matched
+        # (proposal, gt) pair for each proposal — gather the matched GT
+        # corners and shape the call as (B*K1, 1, 8, 3) so the JIT path does
+        # B*K1 polygon clips instead of B*K1*K2.
+        giou_wt = self._loss_weight_dict.get("loss_giou_weight", 0)
+        if giou_wt > 0 and targets["num_boxes_replica"] > 0:
+            per_prop_gt_inds = assignments["per_prop_gt_inds"]  # (B, K1)
+            B, K1 = per_prop_gt_inds.shape
+            gt_corners = targets["gt_box_corners"]  # (B, K2, 8, 3)
+            gt_matched = torch.gather(
+                gt_corners,
+                1,
+                per_prop_gt_inds[:, :, None, None].expand(B, K1, 8, 3),
+            )  # (B, K1, 8, 3)
+            pred_corners = outputs["box_corners"]  # (B, K1, 8, 3)
+
+            pred_flat = pred_corners.reshape(B * K1, 1, 8, 3)
+            gt_flat = gt_matched.reshape(B * K1, 1, 8, 3)
+            nums_k2_ones = torch.ones(
+                B * K1, dtype=torch.long, device=pred_flat.device
+            )
+            gious_matched = generalized_box3d_iou(
+                pred_flat,
+                gt_flat,
+                nums_k2_ones,
+                rotated_boxes=self._use_rotated_boxes(),
+                needs_grad=True,
+            ).reshape(B, K1)
+            gious_matched = self._sanitize_gious(
+                gious_matched, outputs, targets, tag="loss"
+            )
+        else:
+            gious_matched = torch.zeros(
+                outputs["box_corners"].shape[:2],
+                device=outputs["box_corners"].device,
+                dtype=outputs["box_corners"].dtype,
+            )
+        outputs["gious_matched"] = gious_matched
 
         losses = {}
         for k in self.loss_functions:
