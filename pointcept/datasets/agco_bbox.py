@@ -291,6 +291,7 @@ class AgcoBBoxV1(Dataset):
         deterministic_debug: bool = False,
         deterministic_seed: int = 0,
         debug_roundtrip_check: bool = False,
+        max_num_obj: int = 64,
     ):
         assert split in ("train", "val", "test"), f"Unknown split: {split}"
         assert len(sensors) > 0, "At least one sensor must be specified"
@@ -307,7 +308,7 @@ class AgcoBBoxV1(Dataset):
         self.require_gravity_align = bool(require_gravity_align)
         self.residual_rpy_warn_rad = np.deg2rad(float(residual_rpy_warn_deg))
         self.loop = int(loop)
-        self.max_num_obj = 64
+        self.max_num_obj = int(max_num_obj)
         if isinstance(min_inliers, dict):
             missing = set(self.sensors) - set(min_inliers.keys())
             assert not missing, (
