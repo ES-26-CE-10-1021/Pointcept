@@ -126,6 +126,8 @@ class SetCriterion3DETR(nn.Module):
         loss_weight_dict=None,
         num_semcls=18,
         num_angle_bin=1,
+        giou_on_aux_outputs=True,
+        giou_mode="optimized",
     ):
         super().__init__()
         if matcher_cfg is None:
@@ -146,6 +148,13 @@ class SetCriterion3DETR(nn.Module):
 
         self.num_semcls = num_semcls
         self.num_angle_bin = num_angle_bin
+        self.giou_on_aux_outputs = bool(giou_on_aux_outputs)
+        self.giou_mode = str(giou_mode)
+        if self.giou_mode not in {"legacy", "optimized"}:
+            raise ValueError(
+                f"Unsupported giou_mode='{self.giou_mode}'. "
+                "Expected 'legacy' or 'optimized'."
+            )
 
         # Counts how many times the GIoU clamp has fired; used for rate-limited
         # logging so anomalies are visible without spamming the training log.
@@ -250,11 +259,18 @@ class SetCriterion3DETR(nn.Module):
         return {"loss_center": center_loss}
 
     def _loss_giou(self, outputs, targets, assignments):
-        # `gious_matched` is (B, K1), already evaluated at the matcher-assigned
-        # GT for every proposal (with grad). For rotated boxes that compute is
-        # ~K2× cheaper than the full (B, K1, K2) grid the matcher uses.
-        gious_matched = outputs["gious_matched"]
-        giou_loss = (1 - gious_matched) * assignments["proposal_matched_mask"]
+        if self.giou_mode == "legacy":
+            gious_dist = 1 - outputs["gious"]
+            giou_loss = torch.gather(
+                gious_dist, 2, assignments["per_prop_gt_inds"].unsqueeze(-1)
+            ).squeeze(-1)
+            giou_loss = giou_loss * assignments["proposal_matched_mask"]
+        else:
+            # `gious_matched` is (B, K1), already evaluated at the matcher-assigned
+            # GT for every proposal (with grad). For rotated boxes that compute is
+            # ~K2× cheaper than the full (B, K1, K2) grid the matcher uses.
+            gious_matched = outputs["gious_matched"]
+            giou_loss = (1 - gious_matched) * assignments["proposal_matched_mask"]
         giou_loss = giou_loss.sum()
         if targets["num_boxes"] > 0:
             giou_loss /= targets["num_boxes"]
@@ -345,7 +361,43 @@ class SetCriterion3DETR(nn.Module):
         gious = torch.nan_to_num(gious, nan=-1.0, posinf=1.0, neginf=-1.0)
         return gious.clamp(-1.0, 1.0)
 
-    def single_output_forward(self, outputs, targets):
+    def single_output_forward(self, outputs, targets, compute_giou_loss=True):
+        if self.giou_mode == "legacy":
+            gious = generalized_box3d_iou(
+                outputs["box_corners"],
+                targets["gt_box_corners"],
+                targets["nactual_gt"],
+                rotated_boxes=torch.any(targets["gt_box_angles"] > 0).item(),
+                needs_grad=(self._loss_weight_dict.get("loss_giou_weight", 0) > 0),
+            )
+            outputs["gious"] = gious.clamp(-1.0, 1.0)
+
+            center_dist = torch.cdist(
+                outputs["center_normalized"],
+                targets["gt_box_centers_normalized"],
+                p=1,
+            )
+            outputs["center_dist"] = center_dist
+            assignments = self.matcher(outputs, targets)
+
+            losses = {}
+            for k in self.loss_functions:
+                loss_wt_key = k + "_weight"
+                if (
+                    loss_wt_key in self._loss_weight_dict
+                    and self._loss_weight_dict[loss_wt_key] > 0
+                ) or loss_wt_key not in self._loss_weight_dict:
+                    curr_loss = self.loss_functions[k](outputs, targets, assignments)
+                    losses.update(curr_loss)
+
+            final_loss = 0
+            for k in self._loss_weight_dict:
+                loss_key = k.replace("_weight", "")
+                if self._loss_weight_dict[k] > 0 and loss_key in losses:
+                    losses[loss_key] = losses[loss_key] * self._loss_weight_dict[k]
+                    final_loss += losses[loss_key]
+            return final_loss, losses
+
         # ── Matcher-side GIoU: full (B, K1, K2) grid, NO grad ───────────────
         # With needs_grad=False this uses the cythonized box_intersection
         # (single batched C call), which is ~K2× faster than the JIT path
@@ -378,38 +430,47 @@ class SetCriterion3DETR(nn.Module):
         # B*K1 polygon clips instead of B*K1*K2.
         giou_wt = self._loss_weight_dict.get("loss_giou_weight", 0)
         if giou_wt > 0 and targets["num_boxes_replica"] > 0:
-            per_prop_gt_inds = assignments["per_prop_gt_inds"]  # (B, K1)
-            B, K1 = per_prop_gt_inds.shape
-            gt_corners = targets["gt_box_corners"]  # (B, K2, 8, 3)
-            gt_matched = torch.gather(
-                gt_corners,
-                1,
-                per_prop_gt_inds[:, :, None, None].expand(B, K1, 8, 3),
-            )  # (B, K1, 8, 3)
-            pred_corners = outputs["box_corners"]  # (B, K1, 8, 3)
+            if not compute_giou_loss:
+                gious_matched = torch.zeros(
+                    outputs["box_corners"].shape[:2],
+                    device=outputs["box_corners"].device,
+                    dtype=outputs["box_corners"].dtype,
+                )
+                outputs["gious_matched"] = gious_matched
+            else:
+                per_prop_gt_inds = assignments["per_prop_gt_inds"]  # (B, K1)
+                B, K1 = per_prop_gt_inds.shape
+                gt_corners = targets["gt_box_corners"]  # (B, K2, 8, 3)
+                gt_matched = torch.gather(
+                    gt_corners,
+                    1,
+                    per_prop_gt_inds[:, :, None, None].expand(B, K1, 8, 3),
+                )  # (B, K1, 8, 3)
+                pred_corners = outputs["box_corners"]  # (B, K1, 8, 3)
 
-            pred_flat = pred_corners.reshape(B * K1, 1, 8, 3)
-            gt_flat = gt_matched.reshape(B * K1, 1, 8, 3)
-            nums_k2_ones = torch.ones(
-                B * K1, dtype=torch.long, device=pred_flat.device
-            )
-            gious_matched = generalized_box3d_iou(
-                pred_flat,
-                gt_flat,
-                nums_k2_ones,
-                rotated_boxes=self._use_rotated_boxes(),
-                needs_grad=True,
-            ).reshape(B, K1)
-            gious_matched = self._sanitize_gious(
-                gious_matched, outputs, targets, tag="loss"
-            )
+                pred_flat = pred_corners.reshape(B * K1, 1, 8, 3)
+                gt_flat = gt_matched.reshape(B * K1, 1, 8, 3)
+                nums_k2_ones = torch.ones(
+                    B * K1, dtype=torch.long, device=pred_flat.device
+                )
+                gious_matched = generalized_box3d_iou(
+                    pred_flat,
+                    gt_flat,
+                    nums_k2_ones,
+                    rotated_boxes=self._use_rotated_boxes(),
+                    needs_grad=True,
+                ).reshape(B, K1)
+                gious_matched = self._sanitize_gious(
+                    gious_matched, outputs, targets, tag="loss"
+                )
+                outputs["gious_matched"] = gious_matched
         else:
             gious_matched = torch.zeros(
                 outputs["box_corners"].shape[:2],
                 device=outputs["box_corners"].device,
                 dtype=outputs["box_corners"].dtype,
             )
-        outputs["gious_matched"] = gious_matched
+            outputs["gious_matched"] = gious_matched
 
         losses = {}
         for k in self.loss_functions:
@@ -449,7 +510,9 @@ class SetCriterion3DETR(nn.Module):
         if "aux_outputs" in outputs:
             for k, aux_out in enumerate(outputs["aux_outputs"]):
                 interm_loss, interm_loss_dict = self.single_output_forward(
-                    aux_out, targets
+                    aux_out,
+                    targets,
+                    compute_giou_loss=self.giou_on_aux_outputs,
                 )
                 loss += interm_loss
                 for key in interm_loss_dict:

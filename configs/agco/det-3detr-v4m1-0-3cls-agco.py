@@ -95,6 +95,7 @@ model = dict(
     center_offset_normalized=True,
     criterion=dict(
         type="SetCriterion3DETR",
+        giou_on_aux_outputs=False,
         matcher_cfg=dict(
             cost_class=1.0,
             cost_objectness=0.0,
