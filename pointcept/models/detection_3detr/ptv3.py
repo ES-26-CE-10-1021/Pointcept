@@ -23,7 +23,6 @@ extractor. Checkpoint weights are pulled from HuggingFace on first
 use and never updated during training.
 """
 
-import contextlib
 import logging
 
 import torch
@@ -246,8 +245,8 @@ class PTv3m3PreEncoder(PointTransformerV3m3):
             recorded config before instantiating the backbone. Cannot
             change ``in_channels`` (which would desync the embedding
             weight shape from the checkpoint).
-        freeze_backbone (str): one of ``"full"``, ``"enc"``, ``"none"``.
-            See above.
+        freeze_backbone (str): one of ``"enc"``, ``"enc_finetune"``,
+            ``"none"``. See above.
         grid_size (float): voxel size used to serialize the input point
             cloud before running the backbone.
         npoint (int | None): if set, apply FPS on the backbone output to
@@ -354,7 +353,17 @@ class PTv3m3PreEncoder(PointTransformerV3m3):
         pretraining heads). Missing keys remain a hard error: those
         indicate real structural divergence.
         """
-        incompatible = self.load_state_dict(state_dict, strict=False)
+        try:
+            self.load_state_dict(state_dict, strict=True)
+            _logger.info(
+                "PTv3m3PreEncoder: loaded Utonia checkpoint '%s' with zero "
+                "missing / unexpected keys.",
+                self._pretrained,
+            )
+            return
+        except RuntimeError:
+            incompatible = self.load_state_dict(state_dict, strict=False)
+
         missing = list(incompatible.missing_keys)
         unexpected = list(incompatible.unexpected_keys)
 
