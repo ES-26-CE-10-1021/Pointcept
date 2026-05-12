@@ -109,6 +109,44 @@ def create_box_lineset_from_corners(corners, color=None):
     return line_set
 
 
+def corners_to_lidar_box_params(corners):
+    """Infer (center, size, yaw) from ordered 8-corner cuboid in lidar frame.
+
+    Yaw is around +Z (lidar convention used by this visualizer).
+    """
+    corners = np.asarray(corners, dtype=np.float64)
+    center = corners.mean(axis=0)
+
+    # Use the quad edges (0-1-2-3) to recover in-plane dimensions + heading.
+    e01 = corners[1] - corners[0]
+    e12 = corners[2] - corners[1]
+    e23 = corners[3] - corners[2]
+    e30 = corners[0] - corners[3]
+    edges = [e01, e12, e23, e30]
+    lens = [np.linalg.norm(e[:2]) for e in edges]
+
+    long_idx = int(np.argmax(lens))
+    short_idx = (long_idx + 1) % 4
+    long_vec = edges[long_idx]
+    short_vec = edges[short_idx]
+
+    length = float(np.linalg.norm(long_vec[:2]))
+    width = float(np.linalg.norm(short_vec[:2]))
+
+    # Height from vertical edge lengths; corner ordering preserves vertical pairs.
+    height_edges = [
+        np.linalg.norm(corners[4] - corners[0]),
+        np.linalg.norm(corners[5] - corners[1]),
+        np.linalg.norm(corners[6] - corners[2]),
+        np.linalg.norm(corners[7] - corners[3]),
+    ]
+    height = float(np.mean(height_edges))
+
+    yaw = float(np.arctan2(long_vec[1], long_vec[0]))
+    size = np.array([length, width, height], dtype=np.float64)
+    return center, size, yaw
+
+
 CLASS_COLORS = [
     [0.0, 1.0, 0.0],  # tractor — green
     [0.0, 0.0, 1.0],  # harvester — blue
@@ -223,7 +261,13 @@ def build_geometries_for_prediction(record, pts, score_thresh=0.0):
         base = CLASS_COLORS[min(cls_id, len(CLASS_COLORS) - 1)]
         dim_color = [c * 0.5 for c in base]
         pred_corners = camera_to_lidar_np(np.asarray(box["box_corners"]))
-        geometries.append(create_box_lineset_from_corners(pred_corners, dim_color))
+
+        # Quick diagnostic toggle: invert predicted yaw only in visualization.
+        # This helps validate camera/lidar heading-sign mismatch hypotheses.
+        center, size, pred_yaw = corners_to_lidar_box_params(pred_corners)
+        inv_yaw = -pred_yaw
+        rot_mat = Rot.from_euler("xyz", [0.0, 0.0, inv_yaw]).as_matrix()
+        geometries.append(create_box_lineset(center, size, rot_mat, dim_color))
 
     return geometries
 
