@@ -1,15 +1,26 @@
 """
-3DETR on AGCO — v2m4-0-3cls-agco (lslidar): Utonia enc_finetune + FPS 2048 + Vanilla encoder + SUN-like loss.
+3DETR on AGCO — v2m4-0-3cls: Utonia + FPS 2048 + SUN-like loss (lslidar).
 
-Design:
-  - Mirrors scannet det-3detr-utonia-v5m1-1-scannet (Utonia PT-v3m3 with
-    enc_finetune, FPS post-downsampling, VanillaTransformerEncoder3DETR) so the
-    AGCO and ScanNet baselines share backbone architecture; only the dataset varies.
-  - AGCO v4-style dataset/runtime knobs + v1m3 SUN-like matcher/loss:
-      lslidar + 100k points.
+v2m4 = v2m3 + FPS post-downsampling to a fixed 2048-token budget on the
+Utonia encoder output. Mirrors scannet det-3detr-utonia-v5m1-1.
+
+Architecture:
+  PTv3m3PreEncoder (pretrained Utonia, freeze_backbone="enc_finetune",
+  npoint=2048) + VanillaTransformerEncoder3DETR(576d, 3L)
+  + TransformerDecoder3DETR(256d, 8L). num_queries=32,
+  center_offset_normalized=True, projection_norm="ln", max_num_obj=16.
+
+Dataset:
+  AgcoBBoxV1, sensors=["lslidar"], num_points=100_000, 3-class, normal
+  splits, gravity-leveled, fixed_pc_dims, ±60° FOV + spherical crops,
+  min_inliers=350. utonia_preprocess=True.
+
+Criterion (SUN-like):
+  matcher class=1/objectness=5/giou=3/center=5;
+  loss_giou=0, loss_no_object=0.1, loss_center=5, loss_size=1.
 
 Usage:
-  sh scripts/train.sh -d agco -c det-3detr-v2m4-0-3cls-agco -n det-3detr-v2m4-0-3cls-agco -g 2
+  sh scripts/train.sh -d agco -c det-3detr-v2m4-0-3cls-agco -n v2m4 -g 2
 """
 
 _base_ = ["../_base_/default_runtime.py"]

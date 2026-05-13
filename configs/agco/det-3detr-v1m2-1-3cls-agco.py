@@ -1,15 +1,23 @@
 """
-3DETR on AGCO — v1m2-0-3cls-lslidar: base 3DETR backbone + AGCO v4 data/runtime settings.
+3DETR on AGCO — v1m2-1-3cls: PointNet++ + AGCO knobs, overfit (lslidar).
 
-Design:
-  - Base 3DETR model stack from det-3detr-v1m1-0-agco:
-      PointnetSAPreEncoder + VanillaTransformerEncoder3DETR + TransformerDecoder3DETR
-  - AGCO v4-style dataset/runtime knobs:
-      consistent fixed point-cloud scaling, center_offset_normalized=True,
-      num_queries=32, giou_on_aux_outputs=False, lslidar + 100k points.
+Same architecture, dataset, and criterion as v1m2-0-3cls-agco; val and
+test point to split="train" for overfit-style diagnostics.
+
+Architecture:
+  PointnetSAPreEncoder(2048) + Vanilla(256d, 3L) + Decoder(256d, 8L).
+  num_queries=32, center_offset_normalized=True, max_num_obj=16.
+
+Dataset:
+  AgcoBBoxV1, sensors=["lslidar"], num_points=100_000, 3-class,
+  val/test = train (overfit), gravity-leveled, fixed_pc_dims, ±60° FOV
+  + spherical crops, min_inliers=350.
+
+Criterion:
+  3DETR native (loss_giou=1.0). giou_on_aux_outputs=False.
 
 Usage:
-  sh scripts/train.sh -d agco -c det-3detr-v1m2-0-3cls-agco -n v1m2_base3detr -g 2
+  sh scripts/train.sh -d agco -c det-3detr-v1m2-1-3cls-agco -n v1m2_overfit -g 2
 """
 
 _base_ = ["../_base_/default_runtime.py"]

@@ -1,28 +1,36 @@
 """
-3DETR on AGCO — v2m3-0-3cls-agco-rslidar: Utonia (PT-v3m3) pre-encoder with last-stage fine-tune,
-combined with v1m3 SUN-like matcher/loss + AGCO v4 rslidar dataset settings.
+3DETR on AGCO — v2m3-0-3cls-rslidar: Utonia + AGCO knobs + SUN-like loss (rslidar).
 
-Design:
-  - Base 3DETR model stack from det-3detr-v2m1-0-3cls-agco:
-      PTv3m3PreEncoder (Utonia, enc_finetune) + VanillaTransformerEncoder3DETR + TransformerDecoder3DETR
-  - AGCO v4-style dataset/runtime knobs + v1m3 SUN-like matcher/loss:
-      consistent fixed point-cloud scaling, center_offset_normalized=True,
-      num_queries=32, giou_on_aux_outputs=False, rslidar + 30k points.
+Architecture:
+  PTv3m3PreEncoder (pretrained Utonia, freeze_backbone="enc_finetune")
+  + VanillaTransformerEncoder3DETR(576d, 3L)
+  + TransformerDecoder3DETR(256d, 8L). num_queries=32,
+  center_offset_normalized=True, projection_norm="ln", max_num_obj=16.
+
+Dataset:
+  AgcoBBoxV1, sensors=["rslidar"], num_points=30_000, 3-class, normal
+  splits, gravity-leveled, fixed_pc_dims, ±60° FOV + spherical crops
+  (max_dist=20 m), min_inliers=80. utonia_preprocess=True.
+
+Criterion (SUN-like):
+  matcher class=1/objectness=5/giou=3/center=5;
+  loss_giou=0, loss_no_object=0.1, loss_center=5, loss_size=1.
+  giou_on_aux_outputs=False.
 
 Usage:
-  sh scripts/train.sh -d agco -c det-3detr-v2m3-0-3cls-agco-rslidar -n det-3detr-v2m3-0-3cls-agco-rslidar -g 2
+  sh scripts/train.sh -d agco -c det-3detr-v2m3-0-3cls-agco-rslidar -n v2m3_rslidar -g 2
 """
 
 _base_ = ["../_base_/default_runtime.py"]
 
 # -- Training -----------------------------------------------------------------
-batch_size = 4
+batch_size = 8
 num_worker = 16
 mix_prob = 0
 enable_amp = False
 find_unused_parameters = False
 clip_grad = 1.0
-gradient_accumulation_steps = 2
+gradient_accumulation_steps = 1
 
 included_classes = ("tractor", "harvester", "trailer")
 num_semcls = len(included_classes)

@@ -1,9 +1,19 @@
 """
-3DETR on AGCO — v1m1-0-3cls: PointNet++ SA pre-encoder + vanilla Transformer + spherical
-and ±60° FOV crops, with only 3 classes: tractor, harvester, trailer.
+3DETR on AGCO — v1m1-0-3cls: PointNet++ baseline, 3-class (lslidar).
 
-Identical to configs/agco/det-3detr-v1m1-0-agco.py except `included_classes` is reduced
-to 3 (discards car and hopper). Boxes for excluded classes are dropped at dataset load time.
+Architecture:
+  PointnetSAPreEncoder(2048) + VanillaTransformerEncoder3DETR(256d, 3L)
+  + TransformerDecoder3DETR(256d, 8L). num_queries=128.
+
+Dataset:
+  AgcoBBoxV1, sensors=["lslidar"], num_points=100_000, 3-class
+  (tractor/harvester/trailer; car and hopper dropped at load time),
+  normal splits. Gravity-leveled. ±60° FOV + spherical crops on all
+  splits. min_inliers=350.
+
+Criterion:
+  3DETR native (matcher class=1/objectness=0/giou=2/center=0;
+  loss_giou=1.0, loss_no_object=0.25).
 
 Usage:
     sh scripts/train.sh -d agco -c det-3detr-v1m1-0-3cls-agco -n 3detr_agco_v1_3cls -g 2

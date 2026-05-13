@@ -1,10 +1,15 @@
 """
-AGCO 3DETR debug config v2.
+3DETR on AGCO — v0m1-0-debug-v2: 40-epoch learning-focused debug variant.
 
-Adds the main learning-focused diagnostics tweaks on top of the debug config:
-- gravity leveling enabled for both points and boxes
-- matcher costs include center/objectness terms
-- reduced min_inliers for denser supervision
+Inherits v0m1-0-agco-debug and additionally:
+  - epoch=40, eval_epoch=10 (long enough for loss curves to develop)
+  - gravity leveling ON for points and boxes (require_gravity_align=True)
+  - min_inliers=200 (denser GT supervision)
+  - matcher costs widened: cost_objectness=1.0, cost_center=5.0
+    (still 3DETR-style; not the SUN-like criterion used by v1m3/v2m3/v3m3).
+
+Usage:
+    sh scripts/train.sh -d agco -c det-3detr-v0m1-0-agco-debug-v2 -n debug_v2 -g 1
 """
 
 _base_ = ["./det-3detr-v0m1-0-agco-debug.py"]

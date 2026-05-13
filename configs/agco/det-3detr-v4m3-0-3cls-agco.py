@@ -1,21 +1,23 @@
 """
-3DETR on AGCO — v4m3-0-3cls: Scene-scaled center prediction, normal
-train/val/test splits, num_queries=32.
+3DETR on AGCO — v4m3-0-3cls: PTv3, num_queries=32 (lslidar).
 
-Diff vs configs/agco/det-3detr-v3m2-1-3cls-agco.py:
-  - center_offset_normalized=True   (scale the center MLP offset by
-        scene_scale instead of treating it as raw metres; lifts the
-        ±0.5 m per-query cap that breaks AGCO-scale scenes — see
-        BoxProcessor.compute_predicted_center).
-  - num_queries: 32                 (kept low; pair with the center fix
-        to see if a sparse query set + reachable targets is sufficient).
-  - clip_grad: 0.1 -> 1.0           (the previous tight clip was tuned
-        for a regression head that could only move 50 cm/query; with
-        the larger effective offset range, gradients are larger and
-        the old clip strangles learning).
-  - max_num_obj: 64 -> 16           (AGCO scenes carry ≤5 GT boxes; M=16
-        keeps comfortable headroom but trims memory on the angle/cls
-        head and GIoU matcher grid).
+v4m3 is the sparse end of the v4 query-density sweep (32 / 128 / 384 in
+v4m3 / v4m1 / v4m2). Functionally equivalent to v3m2-0-3cls-agco;
+maintained as the canonical sparse-query point for the v4 sweep.
+
+Architecture:
+  PTv3PreEncoder (grid_size=0.05, no FPS) + IdentityEncoder3DETR
+  + TransformerDecoder3DETR(256d, 8L). encoder_dim=512,
+  projection_norm="ln", num_queries=32,
+  center_offset_normalized=True, max_num_obj=16.
+
+Dataset:
+  AgcoBBoxV1, sensors=["lslidar"], num_points=100_000, 3-class, normal
+  splits, gravity-leveled, fixed_pc_dims, ±60° FOV + spherical crops,
+  min_inliers=350.
+
+Criterion:
+  3DETR native (loss_giou=1.0, loss_no_object=0.25).
 
 Usage:
     sh scripts/train.sh -d agco -c det-3detr-v4m3-0-3cls-agco -n v4m3 -g 2

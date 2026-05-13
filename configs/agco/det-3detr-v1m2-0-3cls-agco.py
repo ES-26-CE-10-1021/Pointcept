@@ -1,12 +1,27 @@
 """
-3DETR on AGCO — v1m2-0-3cls-lslidar: base 3DETR backbone + AGCO v4 data/runtime settings.
+3DETR on AGCO — v1m2-0-3cls: PointNet++ + AGCO scene-scale knobs (lslidar).
 
-Design:
-  - Base 3DETR model stack from det-3detr-v1m1-0-agco:
-      PointnetSAPreEncoder + VanillaTransformerEncoder3DETR + TransformerDecoder3DETR
-  - AGCO v4-style dataset/runtime knobs:
-      consistent fixed point-cloud scaling, center_offset_normalized=True,
-      num_queries=32, giou_on_aux_outputs=False, lslidar + 100k points.
+v1m2 = v1m1 + AGCO-tuned dataset/model knobs:
+  - center_offset_normalized=True (per-query offset scaled by scene_scale
+    so it can reach beyond the ±0.5 m indoor cap).
+  - fixed_pc_dims (per-sensor consistent normalization bounds).
+  - num_queries 128 → 32 (AGCO scenes carry ≤5 GT boxes).
+  - max_num_obj 64 → 16 (matched to AGCO scene density).
+  - per-sensor min_inliers dict.
+
+Architecture:
+  PointnetSAPreEncoder(2048 pts) + VanillaTransformerEncoder3DETR(256d, 3L)
+  + TransformerDecoder3DETR(256d, 8L). num_queries=32,
+  center_offset_normalized=True.
+
+Dataset:
+  AgcoBBoxV1, sensors=["lslidar"], num_points=100_000, 3-class, normal
+  splits, gravity-leveled, fixed_pc_dims, ±60° FOV + spherical crops,
+  min_inliers=350 (lslidar entry of the per-sensor dict).
+
+Criterion:
+  3DETR native (matcher class=1/objectness=0/giou=2/center=0;
+  loss_giou=1.0, loss_no_object=0.25). giou_on_aux_outputs=False.
 
 Usage:
   sh scripts/train.sh -d agco -c det-3detr-v1m2-0-3cls-agco -n v1m2_base3detr -g 2

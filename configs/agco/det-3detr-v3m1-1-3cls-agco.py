@@ -1,8 +1,21 @@
 """
-3DETR on AGCO — v3m1-1-3cls: Overfitting config (train split on all splits).
+3DETR on AGCO — v3m1-1-3cls: PTv3 + IdentityEncoder, 3-class, overfit (lslidar).
 
-Identical to configs/agco/det-3detr-v3m1-1-agco.py except `included_classes` is reduced
-to 3 (discards car and hopper). Uses train split for val/test to overfit on training data.
+Same architecture and criterion as v3m1-0-3cls-agco; val and test point
+to split="train" for overfit-style diagnostics.
+
+Architecture:
+  PTv3PreEncoder (grid_size=0.05) + IdentityEncoder3DETR
+  + Decoder(256d, 8L). encoder_dim=512, projection_norm="ln",
+  num_queries=128. batch_size=4, gradient_accumulation_steps=2.
+
+Dataset:
+  AgcoBBoxV1, sensors=["lslidar"], num_points=100_000, 3-class,
+  val/test = train (overfit), gravity-leveled, ±60° FOV + spherical
+  crops, min_inliers=350.
+
+Criterion:
+  3DETR native (loss_giou=1.0).
 
 Usage:
     sh scripts/train.sh -d agco -c det-3detr-v3m1-1-3cls-agco -n 3detr_agco_v3_3cls_overfit -g 2

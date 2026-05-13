@@ -1,9 +1,19 @@
 """
-3DETR on AGCO — v2m1-0-3cls: Utonia (PT-v3m3) pre-encoder with last-stage fine-tune,
-with only 3 classes: tractor, harvester, trailer.
+3DETR on AGCO — v2m1-0-3cls: Utonia VFM + last-stage fine-tune, 3-class (lslidar).
 
-Identical to configs/agco/det-3detr-v2m1-0-agco.py except `included_classes` is reduced
-to 3 (discards car and hopper). Boxes for excluded classes are dropped at dataset load time.
+Architecture:
+  PTv3m3PreEncoder (pretrained Utonia, enc_finetune) + Vanilla(576d, 3L)
+  + Decoder(256d, 8L). num_queries=128, projection_norm="ln".
+  batch_size=2, gradient_accumulation_steps=4.
+
+Dataset:
+  AgcoBBoxV1, sensors=["lslidar"], num_points=100_000, 3-class
+  (tractor/harvester/trailer), normal splits, gravity-leveled, ±60° FOV
+  + spherical crops, min_inliers=350. utonia_preprocess=True.
+
+Criterion:
+  3DETR native (matcher class=1/objectness=0/giou=2/center=0;
+  loss_giou=1.0, loss_no_object=0.25).
 
 Usage:
     sh scripts/train.sh -d agco -c det-3detr-v2m1-0-3cls-agco -n 3detr_agco_v2_3cls -g 2

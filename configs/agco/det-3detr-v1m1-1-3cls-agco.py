@@ -1,8 +1,20 @@
 """
-3DETR on AGCO — v1m1-1-3cls: Overfitting config (train split on all splits).
+3DETR on AGCO — v1m1-1-3cls: PointNet++ baseline, 3-class, overfit (lslidar).
 
-Identical to configs/agco/det-3detr-v1m1-1-agco.py except `included_classes` is reduced
-to 3 (discards car and hopper). Uses train split for val/test to overfit on training data.
+Same architecture and criterion as v1m1-0-3cls-agco; val and test point
+to split="train" for overfit-style diagnostics.
+
+Architecture:
+  PointnetSAPreEncoder(2048) + Vanilla(256d, 3L) + Decoder(256d, 8L).
+  num_queries=128.
+
+Dataset:
+  AgcoBBoxV1, sensors=["lslidar"], num_points=100_000, 3-class,
+  val/test = train (overfit), gravity-leveled, ±60° FOV + spherical crops,
+  min_inliers=350.
+
+Criterion:
+  3DETR native (loss_giou=1.0, no objectness/center matcher costs).
 
 Usage:
     sh scripts/train.sh -d agco -c det-3detr-v1m1-1-3cls-agco -n 3detr_agco_v1_3cls_overfit -g 2

@@ -1,21 +1,24 @@
 """
-3DETR on AGCO — v2: Utonia (PT-v3m3) pre-encoder with last-stage fine-tune.
+3DETR on AGCO — v2m1-1: Utonia VFM + last-stage fine-tune, overfit (5-class, lslidar).
 
-Mirrors configs/scannet/det-3detr-utonia-v5m1-0-scannet.py adapted to AgcoBBoxV1
-(oriented boxes, 5 classes, num_angle_bin=12, lslidar single-sensor) with the
-same spherical + ±60° FOV crops as configs/agco/det-3detr-v1m1-0-agco.py.
+Same architecture and criterion as v2m1-0-agco; val and test point to
+split="train" for overfit-style diagnostics.
 
-Key choices:
-  - ``pre_encoder.pretrained = "utonia"``  (HF checkpoint auto-loaded by
-    PTv3m3PreEncoder; ``in_channels=9`` is locked to the checkpoint).
-  - ``utonia_preprocess=True`` on AgcoBBoxV1 right-pads point_clouds from
-    XYZ (3 ch) to 9 ch with zeros for the missing rgb / normal channels.
-  - ``freeze_backbone="enc_finetune"``: embedding + early encoder stages
-    frozen; the last encoder stage trains end-to-end with the 3DETR head.
-  - Gravity alignment enabled on all splits.
+Architecture:
+  PTv3m3PreEncoder (pretrained Utonia, enc_finetune) + Vanilla(576d, 3L)
+  + Decoder(256d, 8L). num_queries=128, projection_norm="ln".
+  batch_size=2, gradient_accumulation_steps=4.
+
+Dataset:
+  AgcoBBoxV1, sensors=["lslidar"], num_points=100_000, 5-class,
+  val/test = train (overfit), gravity-leveled, ±60° FOV + spherical
+  crops, min_inliers=350. utonia_preprocess=True.
+
+Criterion:
+  3DETR native (loss_giou=1.0, no objectness/center matcher costs).
 
 Usage:
-    sh scripts/train.sh -d agco -c det-3detr-v2m1-0-agco -n 3detr_agco_v2_utonia -g 2
+    sh scripts/train.sh -d agco -c det-3detr-v2m1-1-agco -n 3detr_agco_v2_overfit -g 2
 """
 
 _base_ = ["../_base_/default_runtime.py"]

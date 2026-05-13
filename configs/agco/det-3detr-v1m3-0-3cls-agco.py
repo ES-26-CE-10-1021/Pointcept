@@ -1,12 +1,23 @@
 """
-3DETR on AGCO — v1m3-0-3cls: v1m2 model/data with SUN-like loss design.
+3DETR on AGCO — v1m3-0-3cls: PointNet++ + AGCO knobs + SUN-like loss (lslidar).
 
-Design:
-  - Base 3DETR model stack from det-3detr-v1m1-0-agco:
-      PointnetSAPreEncoder + VanillaTransformerEncoder3DETR + TransformerDecoder3DETR
-  - AGCO v4-style dataset/runtime knobs:
-      consistent fixed point-cloud scaling, center_offset_normalized=True,
-      num_queries=32, giou_on_aux_outputs=False, lslidar + 100k points.
+v1m3 = v1m2 + SUN-RGBD-style criterion (replaces 3DETR's GIoU-heavy loss
+with class/objectness/center-driven matching that works better when
+oriented boxes make GIoU expensive/noisy):
+  matcher: cost_class=1, cost_objectness=5, cost_giou=3, cost_center=5
+  loss:    loss_giou=0, loss_no_object=0.1 (vs 0.25 in 3DETR default),
+           loss_center=5, loss_size=1, loss_sem_cls=1,
+           loss_angle_cls=0.1, loss_angle_reg=0.5
+
+Architecture:
+  PointnetSAPreEncoder(2048 pts) + VanillaTransformerEncoder3DETR(256d, 3L)
+  + TransformerDecoder3DETR(256d, 8L). num_queries=32,
+  center_offset_normalized=True, max_num_obj=16.
+
+Dataset:
+  AgcoBBoxV1, sensors=["lslidar"], num_points=100_000, 3-class, normal
+  splits, gravity-leveled, fixed_pc_dims, ±60° FOV + spherical crops,
+  min_inliers=350.
 
 Usage:
   sh scripts/train.sh -d agco -c det-3detr-v1m3-0-3cls-agco -n v1m3_sunloss -g 2

@@ -1,21 +1,21 @@
 """
-3DETR on AGCO — v3: PTv3 pre-encoder + Identity encoder + Transformer decoder.
+3DETR on AGCO — v3m1-0: PTv3 + IdentityEncoder baseline (5-class, lslidar).
 
-Mirrors configs/scannet/det-3detr-v2m1-0-scannet.py (PTv3PreEncoder feeding an
-IdentityEncoder3DETR, with the cross-attention TransformerDecoder3DETR for box
-queries) adapted to AgcoBBoxV1:
-  - 5 classes, oriented boxes via AgcoBBoxConfig (num_angle_bin=12).
-  - num_queries=128 (fewer objects per scan than ScanNet indoor scenes).
-  - PTv3 grid_size=0.05 — outdoor LiDAR is much sparser than ScanNet's indoor
-    voxelization (0.02).
+Architecture:
+  PTv3PreEncoder (grid_size=0.05, variable-length voxel output, no FPS)
+  + IdentityEncoder3DETR (passthrough — PTv3's serialized attention already
+  mixes features) + TransformerDecoder3DETR(256d, 8L). encoder_dim=512,
+  projection_norm="ln" (padding-safe). num_queries=128.
+  batch_size=4, gradient_accumulation_steps=2.
 
-Augmentation pipeline matches configs/agco/det-3detr-v1m1-0-agco.py:
-  - SphericalCropDetection (max 60 m) + FovCropDetection (±60° azimuth) on all
-    splits, so train/val/test see the same observable wedge.
-  - RandomFlipDetection(p_y=0.5) + RandomRotateZDetection(±5°) on train only.
-  - PointSubsampleDetection enforces num_points as the final step.
+Dataset:
+  AgcoBBoxV1, sensors=["lslidar"], num_points=100_000, 5-class, normal
+  splits, gravity-leveled, ±60° FOV + spherical crops (1..60 m),
+  min_inliers=350. No fixed_pc_dims.
 
-Gravity alignment is enabled on all splits.
+Criterion:
+  3DETR native (matcher class=1/objectness=0/giou=2/center=0;
+  loss_giou=1.0, loss_no_object=0.25).
 
 Usage:
     sh scripts/train.sh -d agco -c det-3detr-v3m1-0-agco -n 3detr_agco_v3 -g 2

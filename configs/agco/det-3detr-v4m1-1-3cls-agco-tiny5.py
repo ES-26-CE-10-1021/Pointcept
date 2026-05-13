@@ -1,16 +1,28 @@
 """
-3DETR on AGCO — tiny5 overfit diagnostic (lslidar).
+3DETR on AGCO — v4m1-1-tiny5: PTv3 + IdentityEncoder, 5-sample overfit (lslidar).
 
-Purpose:
-  Validate end-to-end dataset/model/loss wiring by forcing overfit on a
-  fixed 5-sample allowlist. All splits point to the same tiny root set and
-  the same per-sample allowlist.
+End-to-end wiring sanity check: forces overfit on a fixed 5-sample
+allowlist. All splits load the same tiny set
+(split_prefix="agco_tiny5"). Note that num_queries=32 here (not 128 like
+the rest of the v4m1 family); the file name reflects historical
+provenance, but the model matches v3m2.
 
-Prerequisites in `meta_data_dir`:
-  - agco_tiny5_train.txt
-  - agco_tiny5_val.txt
-  - agco_tiny5_test.txt
-  - agco_tiny5_samples_lslidar.txt    # lines: <root>,<sensor>,<timestamp>
+Prerequisites in meta_data_dir:
+  agco_tiny5_train.txt, agco_tiny5_val.txt, agco_tiny5_test.txt,
+  agco_tiny5_samples_lslidar.txt  (lines: <root>,<sensor>,<timestamp>)
+
+Architecture:
+  PTv3PreEncoder (grid_size=0.05) + IdentityEncoder3DETR
+  + Decoder(256d, 8L). encoder_dim=512, projection_norm="ln",
+  num_queries=32, center_offset_normalized=True, max_num_obj=16.
+  1000 epochs, loop=50, deterministic point subsampling (seed=0).
+
+Dataset:
+  AgcoBBoxV1, sensors=["lslidar"], num_points=100_000, 3-class, all
+  splits = train (5-sample allowlist), gravity-leveled, fixed_pc_dims.
+
+Criterion:
+  3DETR native (loss_giou=1.0).
 
 Usage:
   sh scripts/train.sh -d agco -c det-3detr-v4m1-1-3cls-agco-tiny5 -n tiny5_overfit -g 1

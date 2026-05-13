@@ -1,16 +1,26 @@
 """
-3DETR on AGCO — tiny5 overfit diagnostic (ouster).
+3DETR on AGCO — v4m1-1-tiny5-ouster: PTv3 + IdentityEncoder, 5-sample overfit (ouster).
 
-Purpose:
-  Validate end-to-end dataset/model/loss wiring by forcing overfit on a
-  fixed 5-sample allowlist. All splits point to the same tiny root set and
-  the same per-sample allowlist.
+End-to-end wiring sanity check on a fixed 5-sample allowlist. All splits
+load the same tiny set (split_prefix="agco_tiny5"). num_queries=32 (the
+v4m1 file naming is historical; model matches v3m2).
 
-Prerequisites in `meta_data_dir`:
-  - agco_tiny5_train.txt
-  - agco_tiny5_val.txt
-  - agco_tiny5_test.txt
-  - agco_tiny5_samples_ouster.txt     # lines: <root>,<sensor>,<timestamp>
+Prerequisites in meta_data_dir:
+  agco_tiny5_train.txt, agco_tiny5_val.txt, agco_tiny5_test.txt,
+  agco_tiny5_samples_ouster.txt  (lines: <root>,<sensor>,<timestamp>)
+
+Architecture:
+  PTv3PreEncoder (grid_size=0.05) + IdentityEncoder3DETR
+  + Decoder(256d, 8L). encoder_dim=512, projection_norm="ln",
+  num_queries=32, center_offset_normalized=True, max_num_obj=16.
+  Loop and deterministic subsampling configured for overfit.
+
+Dataset:
+  AgcoBBoxV1, sensors=["ouster"], num_points=40_000, 3-class, all
+  splits = train (5-sample allowlist), gravity-leveled, fixed_pc_dims.
+
+Criterion:
+  3DETR native (loss_giou=1.0).
 
 Usage:
   sh scripts/train.sh -d agco -c det-3detr-v4m1-1-3cls-agco-ouster-tiny5 -n tiny5_overfit_ouster -g 1

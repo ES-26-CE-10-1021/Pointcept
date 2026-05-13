@@ -1,28 +1,35 @@
 """
-3DETR on AGCO — v2m4-0-3cls-agco-ouster: Utonia enc_finetune + FPS 2048 + Vanilla encoder + SUN-like loss.
+3DETR on AGCO — v2m4-0-3cls-ouster: Utonia + FPS 2048 + SUN-like loss (ouster).
 
-Design:
-  - Mirrors scannet det-3detr-utonia-v5m1-1-scannet (Utonia PT-v3m3 with
-    enc_finetune, FPS post-downsampling, VanillaTransformerEncoder3DETR) so the
-    AGCO and ScanNet baselines share backbone architecture; only the dataset varies.
-  - AGCO v4-style dataset/runtime knobs + v1m3 SUN-like matcher/loss:
-      consistent fixed point-cloud scaling, center_offset_normalized=True,
-      num_queries=32, giou_on_aux_outputs=False, ouster + 40k points.
+Architecture:
+  PTv3m3PreEncoder (pretrained Utonia, enc_finetune, npoint=2048 FPS)
+  + VanillaTransformerEncoder3DETR(576d, 3L)
+  + TransformerDecoder3DETR(256d, 8L). num_queries=32,
+  center_offset_normalized=True, projection_norm="ln", max_num_obj=16.
+
+Dataset:
+  AgcoBBoxV1, sensors=["ouster"], num_points=40_000, 3-class, normal
+  splits, gravity-leveled, fixed_pc_dims, ±60° FOV + spherical crops
+  (max_dist=40 m), min_inliers=200. utonia_preprocess=True.
+
+Criterion (SUN-like):
+  matcher class=1/objectness=5/giou=3/center=5;
+  loss_giou=0, loss_no_object=0.1, loss_center=5, loss_size=1.
 
 Usage:
-  sh scripts/train.sh -d agco -c det-3detr-v2m4-0-3cls-agco-ouster -n det-3detr-v2m4-0-3cls-agco-ouster -g 2
+  sh scripts/train.sh -d agco -c det-3detr-v2m4-0-3cls-agco-ouster -n v2m4_ouster -g 2
 """
 
 _base_ = ["../_base_/default_runtime.py"]
 
 # -- Training -----------------------------------------------------------------
-batch_size = 4
+batch_size = 8
 num_worker = 16
 mix_prob = 0
 enable_amp = False
 find_unused_parameters = False
 clip_grad = 1.0
-gradient_accumulation_steps = 2
+gradient_accumulation_steps = 1
 
 included_classes = ("tractor", "harvester", "trailer")
 num_semcls = len(included_classes)

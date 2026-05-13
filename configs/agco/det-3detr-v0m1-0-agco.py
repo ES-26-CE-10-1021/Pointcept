@@ -1,16 +1,22 @@
 """
-3DETR on AGCO — v0: PointNet++ SA pre-encoder + vanilla Transformer.
+3DETR on AGCO — v0m1-0: Native 3DETR baseline on AGCO (5-class, lslidar).
 
-Mirrors configs/scannet/det-3detr-v0m1-0-scannet.py but:
-  - dataset is AgcoBBoxV1 with oriented boxes (num_angle_bin=12, SUN-RGBD-style
-    encoding via AgcoBBoxConfig).
-  - Class set is configurable via `included_classes` (default: all 5 —
-    tractor, harvester, trailer, car, hopper).
-  - num_queries=128 (fewer objects per scan than ScanNet indoor scenes).
+Architecture:
+  PointnetSAPreEncoder(2048 pts) + VanillaTransformerEncoder3DETR(256d, 3L)
+  + TransformerDecoder3DETR(256d, 8L). num_queries=128, no center-offset
+  normalization, no fixed_pc_dims, no gravity leveling.
 
-Fill in `data_root` and `meta_data_dir` for your machine before running. The
-meta_data_dir must contain `agco_train.txt` and `agco_val.txt` listing
-annotation-root directory names (one per line, relative to `data_root`).
+Dataset:
+  AgcoBBoxV1, sensors=["lslidar"], num_points=100_000, oriented boxes
+  (num_angle_bin=12). 5-class set: tractor/harvester/trailer/car/hopper.
+  Normal splits (train/val/test). Sensor->RTK and global RTK rotation are
+  applied; per-frame gravity leveling is OFF (raw RTK frame). min_inliers=500
+  (global int). Augmentation: Y-flip + ±5° yaw rotate.
+
+Criterion:
+  3DETR native (matcher class=1/objectness=0/giou=2/center=0;
+  loss_giou=1.0, loss_no_object=0.25, loss_center=5.0, loss_size=1.0,
+  loss_angle_cls=0.1, loss_angle_reg=0.5).
 
 Usage:
     sh scripts/train.sh -d agco -c det-3detr-v0m1-0-agco -n 3detr_agco_v0 -g 2

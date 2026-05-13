@@ -1,15 +1,28 @@
 """
-3DETR on AGCO — v3m2-0-3cls-agco: base config mimicking v1m2-0 settings with PTv3 model architecture.
+3DETR on AGCO — v3m2-0-3cls: PTv3 + IdentityEncoder + AGCO knobs (lslidar).
 
-Design:
-  - Base 3DETR model stack from det-3detr-v1m1-0-agco:
-      PointnetSAPreEncoder + VanillaTransformerEncoder3DETR + TransformerDecoder3DETR
-  - AGCO v4-style dataset/runtime knobs:
-      consistent fixed point-cloud scaling, center_offset_normalized=True,
-      num_queries=32, giou_on_aux_outputs=False, ouster + 40k points.
+v3m2 = v3m1 + AGCO scene-scale knobs (center_offset_normalized,
+fixed_pc_dims, num_queries 128→32, max_num_obj 64→16). Same backbone
+shape as v3m1; tuned for AGCO scene density.
+
+Architecture:
+  PTv3PreEncoder (grid_size=0.05, no FPS) + IdentityEncoder3DETR
+  + TransformerDecoder3DETR(256d, 8L). encoder_dim=512,
+  projection_norm="ln", num_queries=32,
+  center_offset_normalized=True, max_num_obj=16.
+  batch_size=4, gradient_accumulation_steps=2.
+
+Dataset:
+  AgcoBBoxV1, sensors=["lslidar"], num_points=100_000, 3-class, normal
+  splits, gravity-leveled, fixed_pc_dims, ±60° FOV + spherical crops,
+  min_inliers=350.
+
+Criterion:
+  3DETR native (matcher class=1/objectness=0/giou=2/center=0;
+  loss_giou=1.0, loss_no_object=0.25). giou_on_aux_outputs=False.
 
 Usage:
-  sh scripts/train.sh -d agco -c det-3detr-v3m2-0-3cls-agco -n det-3detr-v3m2-0-3cls-agco -g 2
+  sh scripts/train.sh -d agco -c det-3detr-v3m2-0-3cls-agco -n v3m2 -g 2
 """
 
 _base_ = ["../_base_/default_runtime.py"]

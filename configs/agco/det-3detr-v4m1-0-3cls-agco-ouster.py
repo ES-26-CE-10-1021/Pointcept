@@ -1,37 +1,41 @@
 """
-3DETR on AGCO — v4m1-0-3cls: Scene-scaled center prediction, normal
-train/val/test splits.
+3DETR on AGCO — v4m1-0-3cls-ouster: PTv3, num_queries=128 (ouster).
 
-Diff vs configs/agco/det-3detr-v3m2-1-3cls-agco.py:
-  - center_offset_normalized=True   (scale the center MLP offset by
-        scene_scale instead of treating it as raw metres; lifts the
-        ±0.5 m per-query cap that breaks AGCO-scale scenes — see
-        BoxProcessor.compute_predicted_center).
-  - num_queries: 32 -> 128          (back to indoor default; pair with
-        the center fix to see if the unreachable-target hypothesis was
-        the binding constraint).
-  - clip_grad: 0.1 -> 1.0           (the previous tight clip was tuned
-        for a regression head that could only move 50 cm/query; with
-        the larger effective offset range, gradients are larger and
-        the old clip strangles learning).
-  - max_num_obj: 64 -> 16           (AGCO scenes carry ≤5 GT boxes; M=16
-        keeps comfortable headroom but trims memory on the angle/cls
-        head and GIoU matcher grid).
+v4 family is a query-density sweep on the v3m2 base (PTv3 + Identity
+encoder + AGCO scene-scale knobs):
+  v4m1: num_queries=128 (indoor default)
+  v4m2: num_queries=384 (3× dense)
+  v4m3: num_queries=32  (sparse, same as v3m2)
+Same backbone, dataset, and criterion as v3m2; only num_queries changes.
+
+Architecture:
+  PTv3PreEncoder (grid_size=0.05, no FPS) + IdentityEncoder3DETR
+  + TransformerDecoder3DETR(256d, 8L). encoder_dim=512,
+  projection_norm="ln", num_queries=128,
+  center_offset_normalized=True, max_num_obj=16.
+
+Dataset:
+  AgcoBBoxV1, sensors=["ouster"], num_points=40_000, 3-class, normal
+  splits, gravity-leveled, fixed_pc_dims, ±60° FOV + spherical crops
+  (max_dist=40 m), min_inliers=200.
+
+Criterion:
+  3DETR native (loss_giou=1.0, loss_no_object=0.25).
 
 Usage:
-    sh scripts/train.sh -d agco -c det-3detr-v4m1-0-3cls-agco-ouster -n v4m1 -g 2
+    sh scripts/train.sh -d agco -c det-3detr-v4m1-0-3cls-agco-ouster -n v4m1_ouster -g 2
 """
 
 _base_ = ["../_base_/default_runtime.py"]
 
 # ── Training ─────────────────────────────────────────────────────────────────
-batch_size = 4
+batch_size = 8
 num_worker = 16
 mix_prob = 0
 enable_amp = False
 find_unused_parameters = False
 clip_grad = 1.0
-gradient_accumulation_steps = 2
+gradient_accumulation_steps = 1
 
 included_classes = ("tractor", "harvester", "trailer")
 num_semcls = len(included_classes)

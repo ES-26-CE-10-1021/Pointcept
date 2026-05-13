@@ -1,20 +1,23 @@
 """
-3DETR on AGCO — v1: PointNet++ SA pre-encoder + vanilla Transformer + spherical
-and ±60° FOV crops matching the lslidar's effective range and wedge.
+3DETR on AGCO — v1m1-1: PointNet++ baseline, overfit split (5-class, lslidar).
 
-Same model as configs/agco/det-3detr-v0m1-0-agco.py; only the augmentation
-pipeline changes:
-  - SphericalCropDetection: keep points and box-centers within 2..60 m of origin.
-  - FovCropDetection: keep points and boxes whose centers fall within the
-    lslidar's azimuth FOV of (-60, 60) degrees.
+Same architecture, geometry, and criterion as v1m1-0-agco; val and test
+both point to split="train" for overfit-style diagnostics.
 
-Both crops are deterministic and applied on val/test as well, so the model
-sees the same observable region at train and eval time. Gravity alignment is
-enabled on all splits so the cropped wedge sits in a consistent gravity-leveled
-frame.
+Architecture:
+  PointnetSAPreEncoder(2048) + Vanilla(256d, 3L) + Decoder(256d, 8L).
+  num_queries=128.
+
+Dataset:
+  AgcoBBoxV1, sensors=["lslidar"], num_points=100_000, 5-class,
+  val/test = train (overfit), gravity-leveled, ±60° FOV + spherical crops,
+  min_inliers=350.
+
+Criterion:
+  3DETR native (loss_giou=1.0, no objectness/center matcher costs).
 
 Usage:
-    sh scripts/train.sh -d agco -c det-3detr-v1m1-0-agco -n 3detr_agco_v1 -g 2
+    sh scripts/train.sh -d agco -c det-3detr-v1m1-1-agco -n 3detr_agco_v1_overfit -g 2
 """
 
 _base_ = ["../_base_/default_runtime.py"]

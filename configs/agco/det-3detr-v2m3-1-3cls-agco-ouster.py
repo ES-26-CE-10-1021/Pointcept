@@ -1,27 +1,37 @@
 """
-3DETR on AGCO — v2m3-1-3cls-agco-ouster: overfit variant of v2m3-0 (train split for val/test).
+3DETR on AGCO — v2m3-1-3cls-ouster: Utonia + SUN-like loss, overfit (ouster).
 
-Design:
-  - Base 3DETR model stack from det-3detr-v2m1-0-3cls-agco:
-      PTv3m3PreEncoder (Utonia, enc_finetune) + VanillaTransformerEncoder3DETR + TransformerDecoder3DETR
-  - AGCO v4-style dataset/runtime knobs + v1m3 SUN-like matcher/loss:
-      consistent fixed point-cloud scaling, center_offset_normalized=True,
-      num_queries=32, giou_on_aux_outputs=False, ouster + 40k points.
+Same architecture and criterion as v2m3-0-3cls-ouster; val and test point
+to split="train" for overfit-style diagnostics.
+
+Architecture:
+  PTv3m3PreEncoder (pretrained Utonia, enc_finetune) + Vanilla(576d, 3L)
+  + Decoder(256d, 8L). num_queries=32, center_offset_normalized=True,
+  projection_norm="ln", max_num_obj=16.
+
+Dataset:
+  AgcoBBoxV1, sensors=["ouster"], num_points=40_000, 3-class,
+  val/test = train (overfit), gravity-leveled, fixed_pc_dims, ±60° FOV
+  + spherical crops, min_inliers=200. utonia_preprocess=True.
+
+Criterion (SUN-like):
+  matcher class=1/objectness=5/giou=3/center=5;
+  loss_giou=0, loss_no_object=0.1, loss_center=5, loss_size=1.
 
 Usage:
-  sh scripts/train.sh -d agco -c det-3detr-v2m3-1-3cls-agco-ouster -n det-3detr-v2m3-1-3cls-agco-ouster -g 2
+  sh scripts/train.sh -d agco -c det-3detr-v2m3-1-3cls-agco-ouster -n v2m3_overfit_ouster -g 2
 """
 
 _base_ = ["../_base_/default_runtime.py"]
 
 # -- Training -----------------------------------------------------------------
-batch_size = 4
+batch_size = 8
 num_worker = 16
 mix_prob = 0
 enable_amp = False
 find_unused_parameters = False
 clip_grad = 1.0
-gradient_accumulation_steps = 2
+gradient_accumulation_steps = 1
 
 included_classes = ("tractor", "harvester", "trailer")
 num_semcls = len(included_classes)

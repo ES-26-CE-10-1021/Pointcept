@@ -1,36 +1,37 @@
 """
-3DETR on AGCO — v4m3-1-3cls: Overfit variant with scene-scaled center
-prediction, num_queries=32.
+3DETR on AGCO — v4m3-1-3cls-ouster: PTv3, num_queries=32, overfit (ouster).
 
-Diff vs configs/agco/det-3detr-v3m2-1-3cls-agco.py:
-  - center_offset_normalized=True   (scale the center MLP offset by
-        scene_scale instead of treating it as raw metres; lifts the
-        ±0.5 m per-query cap that breaks AGCO-scale scenes — see
-        BoxProcessor.compute_predicted_center).
-  - num_queries: 32                 (kept low; pair with the center fix
-        to see if a sparse query set + reachable targets is sufficient).
-  - clip_grad: 0.1 -> 1.0           (the previous tight clip was tuned
-        for a regression head that could only move 50 cm/query; with
-        the larger effective offset range, gradients are larger and
-        the old clip strangles learning).
-  - max_num_obj: 64 -> 16           (AGCO scenes carry ≤5 GT boxes; M=16
-        keeps comfortable headroom but trims memory on the angle/cls
-        head and GIoU matcher grid).
+Same architecture and criterion as v4m3-0-3cls-ouster (sparse end of the
+v4 query-density sweep); val and test point to split="train" for
+overfit-style diagnostics. Functionally equivalent to v3m2-1-3cls-ouster.
+
+Architecture:
+  PTv3PreEncoder (grid_size=0.05) + IdentityEncoder3DETR
+  + Decoder(256d, 8L). encoder_dim=512, projection_norm="ln",
+  num_queries=32, center_offset_normalized=True, max_num_obj=16.
+
+Dataset:
+  AgcoBBoxV1, sensors=["ouster"], num_points=40_000, 3-class,
+  val/test = train (overfit), gravity-leveled, fixed_pc_dims, ±60° FOV
+  + spherical crops, min_inliers=200.
+
+Criterion:
+  3DETR native (loss_giou=1.0).
 
 Usage:
-    sh scripts/train.sh -d agco -c det-3detr-v4m3-1-3cls-agco-ouster -n v4m3_overfit -g 2
+    sh scripts/train.sh -d agco -c det-3detr-v4m3-1-3cls-agco-ouster -n v4m3_overfit_ouster -g 2
 """
 
 _base_ = ["../_base_/default_runtime.py"]
 
 # ── Training ─────────────────────────────────────────────────────────────────
-batch_size = 4
+batch_size = 8
 num_worker = 16
 mix_prob = 0
 enable_amp = False
 find_unused_parameters = False
 clip_grad = 1.0
-gradient_accumulation_steps = 2
+gradient_accumulation_steps = 1
 
 included_classes = ("tractor", "harvester", "trailer")
 num_semcls = len(included_classes)

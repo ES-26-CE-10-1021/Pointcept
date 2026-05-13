@@ -1,9 +1,20 @@
 """
-3DETR on AGCO — v3m1-0-3cls: PTv3 pre-encoder + Identity encoder + Transformer decoder,
-with only 3 classes: tractor, harvester, trailer.
+3DETR on AGCO — v3m1-0-3cls: PTv3 + IdentityEncoder, 3-class (lslidar).
 
-Identical to configs/agco/det-3detr-v3m1-0-agco.py except `included_classes` is reduced
-to 3 (discards car and hopper). Boxes for excluded classes are dropped at dataset load time.
+Architecture:
+  PTv3PreEncoder (grid_size=0.05, variable-length voxel output, no FPS)
+  + IdentityEncoder3DETR + TransformerDecoder3DETR(256d, 8L).
+  encoder_dim=512, projection_norm="ln", num_queries=128.
+  batch_size=4, gradient_accumulation_steps=2.
+
+Dataset:
+  AgcoBBoxV1, sensors=["lslidar"], num_points=100_000, 3-class
+  (tractor/harvester/trailer), normal splits, gravity-leveled, ±60°
+  FOV + spherical crops, min_inliers=350. No fixed_pc_dims.
+
+Criterion:
+  3DETR native (matcher class=1/objectness=0/giou=2/center=0;
+  loss_giou=1.0, loss_no_object=0.25).
 
 Usage:
     sh scripts/train.sh -d agco -c det-3detr-v3m1-0-3cls-agco -n 3detr_agco_v3_3cls -g 2

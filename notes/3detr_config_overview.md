@@ -187,79 +187,147 @@ All configs share these settings (matching native 3DETR where applicable):
 
 ## AGCO dataset configs
 
-AGCO detection configs use `AgcoBBoxV1` + `AgcoBBoxConfig` (oriented boxes,
-`num_angle_bin=12`) and vary mostly by dataset/runtime/criterion knobs rather
-than by major model-composition changes.
+AGCO 3DETR detection configs target outdoor agricultural LiDAR scenes
+(tractor / harvester / trailer / car / hopper) collected from three sensors
+(lslidar, ouster, rslidar). They use `AgcoBBoxV1` + `AgcoBBoxConfig`
+(oriented boxes, SUN-RGBD-style angle encoding with `num_angle_bin=12`)
+and a per-sensor cropping + gravity-leveling pipeline.
 
-### AGCO config families
+### Naming conventions
 
-| Family | Core idea | Typical configs |
-|---|---|---|
-| `v0/v1` | Base 3DETR stack (PointNet++ SA + vanilla encoder) | `v0m1-*`, `v1m1-*`, `v1m2-*`, `v1m3-*` |
-| `v3` | PTv3 pre-encoder + identity/vanilla encoder | `v3m1-*`, `v3m2-*` |
-| `v4` | AGCO-focused PTv3 settings (normalized center offsets, query sweeps, fixed dims) | `v4m1-*`, `v4m2-*`, `v4m3-*` |
-| `*-ouster` | Sensor-specific ouster runs (40k points) | all `*-ouster` |
-| `*-1` | Overfit/debug split behavior (`val/test -> train`) | `*m*-1*` |
-| `*tiny5` | 5-sample deterministic overfit diagnostics via allowlist | `*tiny5*` |
+A config filename `det-3detr-<vXmY>-<S>-<C>-agco[-<sensor>][-tiny5].py` decomposes as:
 
-### AGCO settings that matter most
+| Token | Meaning |
+|---|---|
+| `vXmY` | Model "version" (X) and sub-version (Y). See table below. |
+| `-0` / `-1` | `-0` = normal train/val/test splits. `-1` = overfit (val and test both point to `split="train"`). |
+| `-3cls` | Class subset `("tractor", "harvester", "trailer")`. Absent ⇒ 5-class (adds `car`, `hopper`). Boxes outside the active set are dropped at load time. |
+| `-ouster` / `-rslidar` | Single-sensor variant: `sensors=["ouster"]` (40k pts) or `["rslidar"]` (30k pts). Absent ⇒ lslidar (100k pts). |
+| `-tiny5` | 5-sample debug subset via `split_prefix="agco_tiny5"` + a `sample_allowlist_file`. All splits load the same tiny set. |
+| `-debug` / `-debug-v2` | Smoke-test variants of v0m1-0: short schedules, deterministic sampling. |
 
-1. **Class subset + label mapping**
-- `included_classes=(...)` defines active classes and their order.
-- Common modern setting is 3-class: `("tractor", "harvester", "trailer")`.
-- Boxes outside `included_classes` are dropped at dataset load time.
+### `m#` sub-axis convention (within `v1`, `v2`, `v3`)
 
-2. **Oriented-box parameterization**
-- `num_angle_bin=12` (SUN-RGBD style angle cls+residual) for AGCO.
-- Not axis-aligned ScanNet-style detection.
+The sub-version index has a rough "stack-of-features" convention:
 
-3. **Coordinate/calibration stack (AGCO-specific)**
-- `apply_t_rtk=True` + `require_calibration=True`: sensor->RTK transform.
-- `apply_r_global=True`: apply global pitch/roll component.
-- `apply_r_level_to_points=True`, `apply_r_level_to_boxes=True`:
-  gravity leveling from `gravity_align.npz`.
-- `require_gravity_align=True` to enforce leveling assets.
+| `m#` | Adds on top of `m1` |
+|---|---|
+| **m1** | Baseline architecture for that backbone family. |
+| **m2** | + AGCO scene-scale knobs: `center_offset_normalized=True`, `fixed_pc_dims`, `num_queries=32`, `max_num_obj=16`. |
+| **m3** | + SUN-RGBD-style criterion: matcher `class=1/objectness=5/giou=3/center=5`, loss `giou=0/no_object=0.1`. |
+| **m4** | + FPS post-downsampling of the pre-encoder output to a fixed 2048-token budget. |
 
-4. **Consistent normalization bounds**
-- `fixed_pc_dims={...}` stabilizes center/size normalization across scenes.
+**`v4` breaks this convention** — it uses `m#` as a `num_queries` axis instead:
+`v4m1`=128, `v4m2`=384, `v4m3`=32 (v4m3 is functionally equivalent to v3m2).
 
-5. **Sensor-specific dataset geometry**
-- `sensors=["lslidar"]` or `sensors=["ouster"]`.
-- Typical points: `100_000` (lslidar) vs `40_000` (ouster).
+### Model "version" semantics on AGCO
 
-6. **Detection crop policy**
-- Common deterministic crop pair:
-  - `FovCropDetection(azimuth_deg=(-60, 60), crop_points=True)`
-  - `SphericalCropDetection(max_dist/min_dist, per_sensor=...)`
+| Family | Pre-encoder | Encoder | Sub-versions used today |
+|---|---|---|---|
+| `v0m1` | PointnetSAPreEncoder (2048 pts) | Vanilla(256d, 3L) | `v0m1` only — native 3DETR baseline. |
+| `v1m1`/`v1m2`/`v1m3` | PointnetSAPreEncoder (2048 pts) | Vanilla(256d, 3L) | m1 baseline, m2 scene-scale knobs, m3 SUN-like loss. |
+| `v2m1`/`v2m3`/`v2m4` | PTv3m3PreEncoder (Utonia, `enc_finetune`) | Vanilla(576d, 3L) | m1 baseline, m3 scene-scale + SUN loss, m4 + FPS(2048). |
+| `v3m1`/`v3m2`/`v3m3` | PTv3PreEncoder (no FPS) | IdentityEncoder3DETR | m1 baseline (encoder_dim=512), m2 scene-scale knobs, m3 + SUN loss. |
+| `v3m4` | PTv3PreEncoder (FPS `npoint=2048`) | Vanilla(256d, 3L) | Only m4 — PTv3 with FPS to fixed-length, plus a transformer encoder. Mirrors scannet `v3m1-1`. |
+| `v4m1`/`v4m2`/`v4m3` | PTv3PreEncoder (no FPS) | IdentityEncoder3DETR | Query-density sweep on the v3m2 base: 128 / 384 / 32. |
 
-7. **Center prediction parameterization**
-- `center_offset_normalized=True` in newer AGCO configs.
+### Active 3-class config matrix
 
-8. **Query budget sweeps**
-- AGCO experiments vary `num_queries` (e.g. `32`, `128`, `384`).
+These are the configs in current rotation (3-class line). All use `epoch=720`, `eval_epoch=20`, AdamW (lr=5e-4, wd=0.1), OneCycleLR (cos), `enable_amp=False`, oriented boxes (`num_angle_bin=12`), gravity-leveled, fixed_pc_dims, ±60° FOV + spherical crops on all splits, `center_offset_normalized=True`, `max_num_obj=16`. The `-0`/`-1` axis is split behavior; only the `-0` row is shown — `-1` variants exist where listed and differ only by val/test split = train.
 
-9. **Criterion/matcher variants**
-- AGCO defaults: often `loss_giou_weight=1`, matcher center/objectness cost 0.
-- SUN-like variants (`v1m3`) use matcher `{class=1, giou=3, center=5, objectness=5}`,
-  with `loss_giou_weight=0` and `loss_no_object_weight=0.1`.
+| Config (3cls) | Pre-encoder | Encoder | enc_dim | num_queries | Criterion | -1 exists? | lslidar | ouster | rslidar |
+|---|---|---|---|---|---|---|---|---|---|
+| `v1m1` | PointNet++ SA (2048) | Vanilla(256, 3L) | 256 | 128 | 3DETR | ✓ | ✓ | — | — |
+| `v1m2` | PointNet++ SA (2048) | Vanilla(256, 3L) | 256 | 32 | 3DETR | ✓ | ✓ | ✓ | — |
+| `v1m3` | PointNet++ SA (2048) | Vanilla(256, 3L) | 256 | 32 | SUN-like | ✓ | ✓ | ✓ | ✓ (`-0` only) |
+| `v2m1` | Utonia (`enc_finetune`) | Vanilla(576, 3L) | 576 | 128 | 3DETR | ✓ | ✓ | — | — |
+| `v2m3` | Utonia (`enc_finetune`) | Vanilla(576, 3L) | 576 | 32 | SUN-like | ✓ (ouster only) | — | ✓ | ✓ (`-0` only) |
+| `v2m4` | Utonia + FPS 2048 | Vanilla(576, 3L) | 576 | 32 | SUN-like | — | ✓ (`-0` only) | ✓ (`-0` only) | ✓ (`-0` only) |
+| `v3m1` | PTv3 (no FPS) | Identity | 512 | 128 | 3DETR | ✓ | ✓ | — | — |
+| `v3m2` | PTv3 (no FPS) | Identity | 512 | 32 | 3DETR | ✓ | ✓ | ✓ | — |
+| `v3m3` | PTv3 (no FPS) | Identity | 512 | 32 | SUN-like | ✓ (ouster only) | — | ✓ | ✓ (`-0` only) |
+| `v3m4` | PTv3 + FPS 2048 | Vanilla(256, 3L) | 256 | 32 | SUN-like | — | ✓ (`-0` only) | ✓ (`-0` only) | ✓ (`-0` only) |
+| `v4m1` | PTv3 (no FPS) | Identity | 512 | **128** | 3DETR | ✓ | ✓ | ✓ | — |
+| `v4m2` | PTv3 (no FPS) | Identity | 512 | **384** | 3DETR | ✓ | ✓ | ✓ | — |
+| `v4m3` | PTv3 (no FPS) | Identity | 512 | **32** | 3DETR | ✓ | ✓ | ✓ | — |
 
-10. **GIoU execution mode**
-- `SetCriterion3DETR` supports:
-  - `giou_mode="optimized"` (split fast path)
-  - `giou_mode="legacy"` (pre-optimization criterion flow, final `[-1,1]` clamp)
+Tiny-5 debug configs: `v4m1-1-3cls-agco-tiny5` (lslidar) and `v4m1-1-3cls-agco-ouster-tiny5`. Despite the v4m1 name, both use `num_queries=32` (so model-wise they match v3m2; the v4m1 file label is historical).
 
-11. **Overfit/debug behavior**
-- `*-1` configs set `val/test split="train"` for overfit checks.
-- `tiny5` configs use `split_prefix="agco_tiny5"` + `sample_allowlist_file=...`.
+### Legacy 5-class configs
+
+| Config (5cls) | Architecture | num_queries | Criterion | Splits | Notes |
+|---|---|---|---|---|---|
+| `v0m1-0-agco` | PointNet++ SA + Vanilla(256, 3L) | 128 | 3DETR | normal | Native 3DETR baseline on AGCO. No gravity leveling, no fixed_pc_dims, no center_offset_normalized. min_inliers=500 (global). |
+| `v0m1-1-agco` | as v0m1-0 | 128 | 3DETR | overfit | val/test = train. |
+| `v0m1-0-agco-debug` | inherits v0m1-0 | 128 | 3DETR | normal | epoch=2, deterministic sampling, seed=123. |
+| `v0m1-0-agco-debug-v2` | inherits debug + gravity align + objectness/center matcher costs | 128 | 3DETR (extended matcher) | normal | epoch=40. Diagnostic config — not a v1m3-style SUN criterion. |
+| `v1m1-{0,1}-agco` | PointNet++ SA + Vanilla(256, 3L) | 128 | 3DETR | normal/overfit | Adds AGCO geometry: gravity leveling, ±60° FOV + spherical crops on all splits, min_inliers=350. |
+| `v2m1-{0,1}-agco` | Utonia (`enc_finetune`) + Vanilla(576, 3L) | 128 | 3DETR | normal/overfit | batch_size=2, gradient_accumulation_steps=4. |
+| `v3m1-{0,1}-agco` | PTv3 (no FPS) + Identity | 128 | 3DETR | normal/overfit | batch_size=4, gradient_accumulation_steps=2. |
+
+These are kept for ablation history; current experiments use the 3-class line.
+
+### Family narratives
+
+- **v0m1** — Replicates native 3DETR on AGCO data without any AGCO-specific scene-scale handling. Useful as a "what does stock 3DETR do here" reference; weakened by the ±0.5 m per-query center cap on outdoor scenes.
+
+- **v1m1** — v0m1 + AGCO geometry (gravity leveling, ±60° FOV + spherical crops, calibrated sensor→RTK transform). Same model and criterion, just real AGCO frame handling.
+
+- **v1m2** — v1m1 + AGCO scene-scale knobs: `center_offset_normalized=True` (lifts the per-query reach cap), `fixed_pc_dims`, `num_queries=32` (matched to AGCO scene density), `max_num_obj=16`. Still 3DETR criterion.
+
+- **v1m3** — v1m2 + SUN-RGBD-style criterion. Replaces 3DETR's GIoU-heavy loss with a class/objectness/center-driven matcher (`loss_giou=0`, `loss_no_object=0.1`). Works better when oriented-box GIoU is expensive/noisy.
+
+- **v2m1** — Swap PointNet++ for Utonia (pretrained PT-v3m3 VFM) with the last encoder stage trainable (`freeze_backbone="enc_finetune"`). XYZ-only input, zero-padded RGB/normal channels.
+
+- **v2m3** — Utonia + v1m2 scene-scale knobs + SUN-like criterion. The "AGCO-tuned Utonia" line.
+
+- **v2m4** — v2m3 + FPS to a fixed 2048-token budget on the Utonia encoder output. Mirrors scannet `utonia-v5m1-1`.
+
+- **v3m1** — PTv3 (not Utonia) as pre-encoder with Identity encoder (PTv3's serialized attention handles feature mixing). Variable-length voxel output with padding-mask threading.
+
+- **v3m2** — v3m1 + AGCO scene-scale knobs. `num_queries=32`. The current PTv3 baseline.
+
+- **v3m3** — v3m2 + SUN-like criterion. PTv3 counterpart of v1m3.
+
+- **v3m4** — Different shape: PTv3 + FPS(2048) + a 3-layer Vanilla transformer encoder (instead of Identity). Mirrors scannet `v3m1-1`. SUN-like criterion.
+
+- **v4m1 / v4m2 / v4m3** — Query-density sweep on the v3m2 base (PTv3 + Identity + AGCO knobs, 3DETR criterion): 128 / 384 / 32 queries. **v4m3 is functionally equivalent to v3m2**; it's kept as the canonical sparse-query reference point for the sweep.
+
+### Shared settings
+
+All AGCO 3-class configs share:
+- **Optimizer**: AdamW, lr=5e-4, weight_decay=0.1
+- **Scheduler**: OneCycleLR (cosine, `pct_start=0.10`, `div_factor=500`)
+- **Schedule**: 720 epochs, eval every 20 epochs
+- **Decoder**: TransformerDecoder3DETR, decoder_dim=256, nhead=4, nlayers=8, ffn_dim=256
+- **AMP**: disabled
+- **batch_size**: 8 (total) for most configs.
+  - lslidar v3/v4 (PTv3 + 100k pts): `batch_size=4`, `gradient_accumulation_steps=2` for VRAM.
+  - Utonia v2m1: `batch_size=2`, `gradient_accumulation_steps=4`.
+- **Oriented boxes**: AgcoBBoxConfig, num_angle_bin=12
+- **Calibration stack**: `apply_t_rtk=True` (+ `require_calibration=True`), `apply_r_global=True`
+- **Gravity leveling**: ON for all v1m1+ configs (`apply_r_level_to_points`, `apply_r_level_to_boxes`, `require_gravity_align`)
+- **Crops** (deterministic, applied to all splits): `FovCropDetection(azimuth_deg=(-60, 60))` + `SphericalCropDetection(per_sensor)` with `max_dist`=60/40/20 m for lslidar/ouster/rslidar.
+- **Train-only augs**: `RandomFlipDetection(p_x=0, p_y=0.5)` + `RandomRotateZDetection(±5°)`. (`RandomScale`, `RandomJitter`, `RandomCuboid` are registered but not used in current configs.)
+- **min_inliers** (per-sensor dict): `{lslidar: 350, ouster: 200, rslidar: 80}` for v1m2+. Older v0m1/v1m1 use a global int (500/350).
+- **max_num_obj**: 16 for v1m2+; 64 in legacy v0/v1m1.
 
 ### AGCO-specific dataset knobs (`AgcoBBoxV1`)
 
-- `min_inliers` can be global int or per-sensor dict.
-- `max_num_obj` is often reduced (e.g. 16) for AGCO scene density.
-- `sample_allowlist_file` enables exact per-sample subset selection (tiny5).
-- `deterministic_debug` / `deterministic_seed` exist in dataset safety-net path.
+- `included_classes` — defines active classes and their order. Boxes outside this set are dropped at load time.
+- `min_inliers` — global int or per-sensor dict; parents must pass for their children (e.g. trailer hoppers) to be expanded.
+- `sensors` — list of sensors to load (no cross-sensor fusion).
+- `fixed_pc_dims` — per-sensor `{min, max}` for consistent center/size normalization.
+- `apply_t_rtk` / `require_calibration` — sensor → RTK transform via `calibration.yml`.
+- `apply_r_global` — apply global pitch/roll component.
+- `apply_r_level_to_{points,boxes}` + `require_gravity_align` — gravity leveling from `gravity_align.npz`.
+- `utonia_preprocess` — applies Utonia's pretraining-time preprocessing and right-pads point clouds from 3 ch to the 9-ch [xyz, rgb, normal] contract.
+- `sample_allowlist_file` — exact per-sample subset selection (tiny5).
+- `deterministic_debug` / `deterministic_seed` — deterministic point subsampling for debug runs.
 
 ### AGCO detection transforms
+
+Registered in `pointcept/datasets/det_transform.py`:
 
 | Transform | Main knobs |
 |---|---|
@@ -267,7 +335,7 @@ than by major model-composition changes.
 | `SphericalCropDetection` | `max_dist`, `min_dist`, `per_sensor` |
 | `RandomFlipDetection` | `p_x`, `p_y` |
 | `RandomRotateZDetection` | `angle_deg=(lo, hi)` |
-| `PointSubsampleDetection` | `num_points` (+ optional deterministic mode) |
+| `PointSubsampleDetection` | `num_points` (+ optional `deterministic`/`seed`) |
 | `RandomScaleDetection` | `scale=(lo,hi)`, `apply_to_sizes=True` |
 | `RandomJitterDetection` | `sigma`, `clip` |
 | `RandomCuboidDetection` | `min_points`, `aspect`, `min_crop`, `max_crop` |

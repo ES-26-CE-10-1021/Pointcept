@@ -1,15 +1,27 @@
 """
-3DETR on AGCO — v3m4-0-3cls-agco (lslidar): PTv3 + FPS 2048 + Vanilla encoder + SUN-like loss.
+3DETR on AGCO — v3m4-0-3cls: PTv3 + FPS 2048 + Vanilla encoder + SUN-like loss (lslidar).
 
-Design:
-  - Mirrors scannet det-3detr-v3m1-1-scannet (PTv3 with FPS post-downsampling +
-    VanillaTransformerEncoder3DETR) so the AGCO and ScanNet baselines share
-    backbone architecture; only the dataset varies.
-  - AGCO v4-style dataset/runtime knobs + v1m3 SUN-like matcher/loss:
-      lslidar + 100k points.
+v3m4 = PTv3 backbone with FPS post-downsampling to 2048 tokens and a
+3-layer Vanilla transformer encoder (vs IdentityEncoder in v3m1/v3m2/v3m3).
+Mirrors scannet det-3detr-v3m1-1.
+
+Architecture:
+  PTv3PreEncoder (grid_size=0.05, npoint=2048 FPS, encoder_dim=256)
+  + VanillaTransformerEncoder3DETR(256d, 3L)
+  + TransformerDecoder3DETR(256d, 8L). num_queries=32,
+  center_offset_normalized=True, projection_norm="ln", max_num_obj=16.
+
+Dataset:
+  AgcoBBoxV1, sensors=["lslidar"], num_points=100_000, 3-class, normal
+  splits, gravity-leveled, fixed_pc_dims, ±60° FOV + spherical crops,
+  min_inliers=350.
+
+Criterion (SUN-like):
+  matcher class=1/objectness=5/giou=3/center=5;
+  loss_giou=0, loss_no_object=0.1, loss_center=5, loss_size=1.
 
 Usage:
-  sh scripts/train.sh -d agco -c det-3detr-v3m4-0-3cls-agco -n det-3detr-v3m4-0-3cls-agco -g 2
+  sh scripts/train.sh -d agco -c det-3detr-v3m4-0-3cls-agco -n v3m4 -g 2
 """
 
 _base_ = ["../_base_/default_runtime.py"]

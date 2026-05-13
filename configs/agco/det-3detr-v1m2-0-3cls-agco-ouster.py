@@ -1,12 +1,19 @@
 """
-3DETR on AGCO — v1m2-0-3cls-ouster: base 3DETR backbone + AGCO v4 data/runtime settings.
+3DETR on AGCO — v1m2-0-3cls-ouster: PointNet++ + AGCO knobs (ouster).
 
-Design:
-  - Base 3DETR model stack from det-3detr-v1m1-0-agco:
-      PointnetSAPreEncoder + VanillaTransformerEncoder3DETR + TransformerDecoder3DETR
-  - AGCO v4-style dataset/runtime knobs:
-      consistent fixed point-cloud scaling, center_offset_normalized=True,
-      num_queries=32, giou_on_aux_outputs=False, ouster + 40k points.
+Architecture:
+  PointnetSAPreEncoder(2048 pts) + VanillaTransformerEncoder3DETR(256d, 3L)
+  + TransformerDecoder3DETR(256d, 8L). num_queries=32,
+  center_offset_normalized=True, max_num_obj=16.
+
+Dataset:
+  AgcoBBoxV1, sensors=["ouster"], num_points=40_000, 3-class, normal
+  splits, gravity-leveled, fixed_pc_dims (per-sensor), ±60° FOV +
+  spherical crops (max_dist=40 m for ouster), min_inliers=200.
+
+Criterion:
+  3DETR native (matcher class=1/objectness=0/giou=2/center=0;
+  loss_giou=1.0, loss_no_object=0.25). giou_on_aux_outputs=False.
 
 Usage:
   sh scripts/train.sh -d agco -c det-3detr-v1m2-0-3cls-agco-ouster -n v1m2_base3detr_ouster -g 2

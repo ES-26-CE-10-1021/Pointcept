@@ -1,27 +1,36 @@
 """
-3DETR on AGCO — v3m2-1-3cls-agco-ouster: overfit config mimicking v1m2-1 settings with PTv3 model architecture.
+3DETR on AGCO — v3m2-1-3cls-ouster: PTv3 + IdentityEncoder + AGCO knobs, overfit (ouster).
 
-Design:
-  - Base 3DETR model stack from det-3detr-v1m1-0-agco:
-      PointnetSAPreEncoder + VanillaTransformerEncoder3DETR + TransformerDecoder3DETR
-  - AGCO v4-style dataset/runtime knobs:
-      consistent fixed point-cloud scaling, center_offset_normalized=True,
-      num_queries=32, giou_on_aux_outputs=False, ouster + 40k points.
+Same architecture and criterion as v3m2-0-3cls-ouster; val and test point
+to split="train" for overfit-style diagnostics.
+
+Architecture:
+  PTv3PreEncoder (grid_size=0.05) + IdentityEncoder3DETR
+  + Decoder(256d, 8L). encoder_dim=512, projection_norm="ln",
+  num_queries=32, center_offset_normalized=True, max_num_obj=16.
+
+Dataset:
+  AgcoBBoxV1, sensors=["ouster"], num_points=40_000, 3-class,
+  val/test = train (overfit), gravity-leveled, fixed_pc_dims, ±60° FOV
+  + spherical crops, min_inliers=200.
+
+Criterion:
+  3DETR native (loss_giou=1.0). giou_on_aux_outputs=False.
 
 Usage:
-  sh scripts/train.sh -d agco -c det-3detr-v3m2-1-3cls-agco-ouster -n det-3detr-v3m2-1-3cls-agco-ouster -g 2
+  sh scripts/train.sh -d agco -c det-3detr-v3m2-1-3cls-agco-ouster -n v3m2_overfit_ouster -g 2
 """
 
 _base_ = ["../_base_/default_runtime.py"]
 
 # -- Training -----------------------------------------------------------------
-batch_size = 4
+batch_size = 8
 num_worker = 16
 mix_prob = 0
 enable_amp = False
 find_unused_parameters = False
 clip_grad = 1.0
-gradient_accumulation_steps = 2
+gradient_accumulation_steps = 1
 
 included_classes = ("tractor", "harvester", "trailer")
 num_semcls = len(included_classes)

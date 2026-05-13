@@ -1,15 +1,24 @@
 """
-3DETR on AGCO — v1m3-1-3cls-ouster: overfit variant of v1m3-0 (train split for val/test).
+3DETR on AGCO — v1m3-1-3cls-ouster: SUN-like loss, overfit (ouster).
 
-Design:
-  - Base 3DETR model stack from det-3detr-v1m1-0-agco:
-      PointnetSAPreEncoder + VanillaTransformerEncoder3DETR + TransformerDecoder3DETR
-  - AGCO v4-style dataset/runtime knobs:
-      consistent fixed point-cloud scaling, center_offset_normalized=True,
-      num_queries=32, giou_on_aux_outputs=False, ouster + 40k points.
+Same architecture and criterion as v1m3-0-3cls-agco-ouster; val and test
+point to split="train" for overfit-style diagnostics.
+
+Architecture:
+  PointnetSAPreEncoder(2048) + Vanilla(256d, 3L) + Decoder(256d, 8L).
+  num_queries=32, center_offset_normalized=True, max_num_obj=16.
+
+Dataset:
+  AgcoBBoxV1, sensors=["ouster"], num_points=40_000, 3-class,
+  val/test = train (overfit), gravity-leveled, fixed_pc_dims, ±60° FOV
+  + spherical crops (max_dist=40 m), min_inliers=200.
+
+Criterion (SUN-like):
+  matcher class=1/objectness=5/giou=3/center=5;
+  loss_giou=0, loss_no_object=0.1, loss_center=5, loss_size=1.
 
 Usage:
-  sh scripts/train.sh -d agco -c det-3detr-v1m3-1-3cls-agco-ouster -n v1m3_sunloss_ouster_overfit -g 2
+  sh scripts/train.sh -d agco -c det-3detr-v1m3-1-3cls-agco-ouster -n v1m3_overfit_ouster -g 2
 """
 
 _base_ = ["../_base_/default_runtime.py"]
