@@ -109,7 +109,8 @@ Located in `libs/`: `pointops` (core point operations), `pointops2`, `pointgroup
 
 ### Third-Party Submodules
 
-- `third_party/3detr` — 3D Detection Transformer fork (branch `dev`)
+- `third_party/3detr` — original 3DETR (3D Detection Transformer) code, fork on branch `dev`. Used directly via `sys.path` patching by `pointcept/models/detection_3detr/`.
+- `third_party/slurm_scripts` — SLURM job scripts for running training/testing on the cluster.
 
 ### 3DETR Integration (`pointcept/models/detection_3detr/`)
 
