@@ -1,67 +1,80 @@
 """
-3DETR on AGCO — v2m1-1: Utonia VFM + last-stage fine-tune, overfit (5-class, lslidar).
-
-Same architecture and criterion as v2m1-0-agco; val and test point to
-split="train" for overfit-style diagnostics.
+3DETR on AGCO — v3m1-0-3cls: PTv3 + IdentityEncoder, 3-class (lslidar).
 
 Architecture:
-  PTv3m3PreEncoder (pretrained Utonia, enc_finetune) + Vanilla(576d, 3L)
-  + Decoder(256d, 8L). num_queries=128, projection_norm="ln".
-  batch_size=2, gradient_accumulation_steps=4.
+  PTv3PreEncoder (grid_size=0.05, variable-length voxel output, no FPS)
+  + IdentityEncoder3DETR + TransformerDecoder3DETR(256d, 8L).
+  encoder_dim=512, projection_norm="ln", num_queries=128.
+  batch_size=4, gradient_accumulation_steps=2.
 
 Dataset:
-  AgcoBBoxV1, sensors=["lslidar"], num_points=100_000, 5-class,
-  val/test = train (overfit), gravity-leveled, ±60° FOV + spherical
-  crops, min_inliers=350. utonia_preprocess=True.
+  AgcoBBoxV1, sensors=["lslidar"], num_points=100_000, 3-class
+  (tractor/harvester/trailer), normal splits, gravity-leveled, ±60°
+  FOV + spherical crops, min_inliers=350. No fixed_pc_dims.
 
 Criterion:
-  3DETR native (loss_giou=1.0, no objectness/center matcher costs).
+  3DETR native (matcher class=1/objectness=0/giou=2/center=0;
+  loss_giou=1.0, loss_no_object=0.25).
 
 Usage:
-    sh scripts/train.sh -d agco -c det-3detr-v2m1-1-agco -n 3detr_agco_v2_overfit -g 2
+    sh scripts/train.sh -d agco -c det-3detr-v3m1-0-3cls-agco -n 3detr_agco_v3_3cls -g 2
 """
 
 _base_ = ["../_base_/default_runtime.py"]
 
 # ── Training ─────────────────────────────────────────────────────────────────
-batch_size = 2
+batch_size = 4       # PTv3 + 100k pts is heavier than v1; use grad accum for batch_size=8 effective
 num_worker = 16
 mix_prob = 0
 enable_amp = False
 find_unused_parameters = False
 clip_grad = 0.1
-gradient_accumulation_steps = 4
+gradient_accumulation_steps = 2
 
-# Subset of AGCO classes to train/eval on. Boxes for any class not listed here
-# are dropped at dataset load time, so the model never sees them as targets and
-# any prediction that fires on them is penalised as background. Order defines
-# the model class indices (0..K-1).
-included_classes = ("tractor", "harvester", "trailer", "car", "hopper")
+# Subset of AGCO classes to train/eval on: only 3 classes (no car, no hopper).
+# Order defines the model class indices (0..K-1).
+included_classes = ("tractor", "harvester", "trailer")
 num_semcls = len(included_classes)
 num_angle_bin = 12
-
-# Utonia's deepest-stage output width (PT-v3m3 enc_channels[-1]).
-UTONIA_ENC_DIM = 576
 
 # ── Model ─────────────────────────────────────────────────────────────────────
 model = dict(
     type="Model3DETRDetector",
+    # PTv3 Encoder (mirrors scannet v2m1-0; grid_size bumped for outdoor LiDAR)
     pre_encoder=dict(
-        type="PTv3m3PreEncoder",
-        pretrained="utonia",
-        grid_size=0.05,  # outdoor LiDAR — coarser than ScanNet's 0.01
-        enc_mode=True,
-        freeze_backbone="enc_finetune",
+        type="PTv3PreEncoder",
+        grid_size=0.05,
+        in_channels=3,
+        order=("z", "z-trans", "hilbert", "hilbert-trans"),
+        stride=(2, 2, 2, 2),
+        enc_depths=(2, 2, 2, 6, 2),
+        enc_channels=(32, 64, 128, 256, 512),
+        enc_num_head=(2, 4, 8, 16, 32),
+        enc_patch_size=(1024, 1024, 1024, 1024, 1024),
+        mlp_ratio=4,
+        qkv_bias=True,
+        qk_scale=None,
+        attn_drop=0.0,
+        proj_drop=0.0,
+        drop_path=0.3,
+        shuffle_orders=True,
+        pre_norm=True,
+        enable_rpe=False,
+        enable_flash=True,
+        upcast_attention=False,
+        upcast_softmax=False,
+        pdnorm_bn=False,
+        pdnorm_ln=False,
+        pdnorm_decouple=True,
+        pdnorm_adaptive=False,
+        pdnorm_affine=True,
+        pdnorm_conditions=("ScanNet", "S3DIS", "Structured3D"),
     ),
+    # Identity mapping (placeholder for skipping the secondary encoder)
     encoder=dict(
-        type="VanillaTransformerEncoder3DETR",
-        encoder_dim=UTONIA_ENC_DIM,
-        nhead=4,
-        nlayers=3,
-        ffn_dim=128,
-        dropout=0.1,
-        activation="relu",
+        type="IdentityEncoder3DETR",
     ),
+    # Cross-attention decoder for box queries
     decoder=dict(
         type="TransformerDecoder3DETR",
         decoder_dim=256,
@@ -75,7 +88,7 @@ model = dict(
         num_angle_bin=num_angle_bin,
         included_classes=included_classes,
     ),
-    encoder_dim=UTONIA_ENC_DIM,
+    encoder_dim=512,    # must match enc_channels[-1]; encoder_to_decoder_projection handles 512->256
     decoder_dim=256,
     num_queries=128,
     position_embedding="fourier",
@@ -111,10 +124,11 @@ optimizer = dict(type="AdamW", lr=5e-4, weight_decay=0.1)
 scheduler = dict(
     type="OneCycleLR",
     max_lr=[5e-4],
-    pct_start=0.05,
+    pct_start=0.10,
     anneal_strategy="cos",
     div_factor=500.0,
     final_div_factor=1.0,
+    cycle_momentum=False,
 )
 
 # ── Dataset ───────────────────────────────────────────────────────────────────
@@ -146,7 +160,6 @@ data = dict(
 
         sensors=sensors,
         use_intensity=False,
-        utonia_preprocess=True,
 
         num_points=num_points,
         min_inliers=min_inliers,
@@ -166,7 +179,6 @@ data = dict(
             *det_crop_transforms,
             dict(type="RandomFlipDetection", p_x=0.0, p_y=0.5),
             dict(type="RandomRotateZDetection", angle_deg=(-5.0, 5.0)),
-            dict(type="GridSampleDetection", grid_size=0.05),
             dict(type="PointSubsampleDetection", num_points=num_points),
         ],
     ),
@@ -176,12 +188,11 @@ data = dict(
         root_dir=data_root,
         meta_data_dir=meta_data_dir,
 
-        split="train",
+        split="val",
         split_prefix="agco",
 
         sensors=sensors,
         use_intensity=False,
-        utonia_preprocess=True,
 
         num_points=num_points,
         min_inliers=min_inliers,
@@ -199,7 +210,6 @@ data = dict(
 
         transform=[
             *det_crop_transforms,
-            dict(type="GridSampleDetection", grid_size=0.05),
             dict(type="PointSubsampleDetection", num_points=num_points),
         ],
     ),
@@ -209,12 +219,11 @@ data = dict(
         root_dir=data_root,
         meta_data_dir=meta_data_dir,
 
-        split="train",
+        split="test",
         split_prefix="agco",
 
         sensors=sensors,
         use_intensity=False,
-        utonia_preprocess=True,
 
         num_points=num_points,
         min_inliers=min_inliers,
@@ -232,7 +241,6 @@ data = dict(
 
         transform=[
             *det_crop_transforms,
-            dict(type="GridSampleDetection", grid_size=0.05),
             dict(type="PointSubsampleDetection", num_points=num_points),
         ],
     ),

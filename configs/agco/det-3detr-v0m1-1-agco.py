@@ -1,19 +1,22 @@
 """
-3DETR on AGCO — v0: PointNet++ SA pre-encoder + vanilla Transformer.
+3DETR on AGCO — v0m1-1: Native 3DETR baseline, overfit split (5-class, lslidar).
 
-Mirrors configs/scannet/det-3detr-v0m1-0-scannet.py but:
-  - dataset is AgcoBBoxV1 with oriented boxes (num_angle_bin=12, SUN-RGBD-style
-    encoding via AgcoBBoxConfig).
-  - Class set is configurable via `included_classes` (default: all 5 —
-    tractor, harvester, trailer, car, hopper).
-  - num_queries=128 (fewer objects per scan than ScanNet indoor scenes).
+Same architecture and criterion as v0m1-0; val and test both point to
+split="train" for overfit-style diagnostics. See v0m1-0-agco for details.
 
-Fill in `data_root` and `meta_data_dir` for your machine before running. The
-meta_data_dir must contain `agco_train.txt` and `agco_val.txt` listing
-annotation-root directory names (one per line, relative to `data_root`).
+Architecture:
+  PointnetSAPreEncoder(2048 pts) + VanillaTransformerEncoder3DETR(256d, 3L)
+  + TransformerDecoder3DETR(256d, 8L). num_queries=128.
+
+Dataset:
+  AgcoBBoxV1, sensors=["lslidar"], num_points=100_000, 5-class,
+  val/test = train (overfit), no gravity leveling, min_inliers=500.
+
+Criterion:
+  3DETR native (loss_giou=1.0, no objectness/center matcher costs).
 
 Usage:
-    sh scripts/train.sh -d agco -c det-3detr-v0m1-0-agco -n 3detr_agco_v0 -g 2
+    sh scripts/train.sh -d agco -c det-3detr-v0m1-1-agco -n 3detr_agco_v0_overfit -g 2
 """
 
 _base_ = ["../_base_/default_runtime.py"]

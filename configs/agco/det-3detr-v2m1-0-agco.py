@@ -1,18 +1,23 @@
 """
-3DETR on AGCO — v2: Utonia (PT-v3m3) pre-encoder with last-stage fine-tune.
+3DETR on AGCO — v2m1-0: Utonia VFM + last-stage fine-tune (5-class, lslidar).
 
-Mirrors configs/scannet/det-3detr-utonia-v5m1-0-scannet.py adapted to AgcoBBoxV1
-(oriented boxes, 5 classes, num_angle_bin=12, lslidar single-sensor) with the
-same spherical + ±60° FOV crops as configs/agco/det-3detr-v1m1-0-agco.py.
+Architecture:
+  PTv3m3PreEncoder (pretrained Utonia, freeze_backbone="enc_finetune" —
+  embedding + early stages frozen and in eval(), last encoder stage
+  trainable) + VanillaTransformerEncoder3DETR(576d, 3L)
+  + TransformerDecoder3DETR(256d, 8L). num_queries=128,
+  projection_norm="ln" (padding-safe). Utonia preprocessing
+  (grid_size=0.05) + zero-padded rgb/normal channels via
+  utonia_preprocess=True. batch_size=2, gradient_accumulation_steps=4.
 
-Key choices:
-  - ``pre_encoder.pretrained = "utonia"``  (HF checkpoint auto-loaded by
-    PTv3m3PreEncoder; ``in_channels=9`` is locked to the checkpoint).
-  - ``utonia_preprocess=True`` on AgcoBBoxV1 right-pads point_clouds from
-    XYZ (3 ch) to 9 ch with zeros for the missing rgb / normal channels.
-  - ``freeze_backbone="enc_finetune"``: embedding + early encoder stages
-    frozen; the last encoder stage trains end-to-end with the 3DETR head.
-  - Gravity alignment enabled on all splits.
+Dataset:
+  AgcoBBoxV1, sensors=["lslidar"], num_points=100_000, 5-class, normal
+  splits, gravity-leveled, ±60° FOV + spherical crops (1..60 m),
+  min_inliers=350. No fixed_pc_dims (raw scaling).
+
+Criterion:
+  3DETR native (matcher class=1/objectness=0/giou=2/center=0;
+  loss_giou=1.0, loss_no_object=0.25).
 
 Usage:
     sh scripts/train.sh -d agco -c det-3detr-v2m1-0-agco -n 3detr_agco_v2_utonia -g 2

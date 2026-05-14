@@ -1,11 +1,14 @@
 """
-AGCO 3DETR debug config.
+3DETR on AGCO — v0m1-0-debug: Deterministic 2-epoch smoke variant.
 
-Small, deterministic smoke/debug variant of det-3detr-v0m1-0-agco:
-- short schedule (2 epochs)
-- deterministic point sampling for train/val/test
-- roundtrip frame diagnostics enabled
-- prediction export enabled in tester
+Inherits the full v0m1-0-agco config; overrides only:
+  - epoch=2, eval_epoch=1 (short schedule)
+  - deterministic point sampling for train/val/test (seed=123)
+  - debug_roundtrip_check=True (frame-roundtrip diagnostics)
+  - save_predictions=True in the tester
+
+Usage:
+    sh scripts/train.sh -d agco -c det-3detr-v0m1-0-agco-debug -n debug -g 1
 """
 
 _base_ = ["./det-3detr-v0m1-0-agco.py"]

@@ -1,61 +1,55 @@
 """
-3DETR on AGCO — v2m1-1: Utonia VFM + last-stage fine-tune, overfit (5-class, lslidar).
-
-Same architecture and criterion as v2m1-0-agco; val and test point to
-split="train" for overfit-style diagnostics.
+3DETR on AGCO — v1m3-0-3cls-rslidar: PointNet++ + AGCO knobs + SUN-like loss (rslidar).
 
 Architecture:
-  PTv3m3PreEncoder (pretrained Utonia, enc_finetune) + Vanilla(576d, 3L)
-  + Decoder(256d, 8L). num_queries=128, projection_norm="ln".
-  batch_size=2, gradient_accumulation_steps=4.
+  PointnetSAPreEncoder(2048 pts) + VanillaTransformerEncoder3DETR(256d, 3L)
+  + TransformerDecoder3DETR(256d, 8L). num_queries=32,
+  center_offset_normalized=True, max_num_obj=16.
 
 Dataset:
-  AgcoBBoxV1, sensors=["lslidar"], num_points=100_000, 5-class,
-  val/test = train (overfit), gravity-leveled, ±60° FOV + spherical
-  crops, min_inliers=350. utonia_preprocess=True.
+  AgcoBBoxV1, sensors=["rslidar"], num_points=30_000, 3-class, normal
+  splits, gravity-leveled, fixed_pc_dims, ±60° FOV + spherical crops
+  (max_dist=20 m), min_inliers=80.
 
-Criterion:
-  3DETR native (loss_giou=1.0, no objectness/center matcher costs).
+Criterion (SUN-like):
+  matcher class=1/objectness=5/giou=3/center=5;
+  loss_giou=0, loss_no_object=0.1, loss_center=5, loss_size=1.
+  giou_on_aux_outputs=False.
 
 Usage:
-    sh scripts/train.sh -d agco -c det-3detr-v2m1-1-agco -n 3detr_agco_v2_overfit -g 2
+  sh scripts/train.sh -d agco -c det-3detr-v1m3-0-3cls-agco-rslidar -n v1m3_sunloss_rslidar -g 2
 """
 
 _base_ = ["../_base_/default_runtime.py"]
 
-# ── Training ─────────────────────────────────────────────────────────────────
-batch_size = 2
+# -- Training -----------------------------------------------------------------
+batch_size = 8
 num_worker = 16
 mix_prob = 0
 enable_amp = False
 find_unused_parameters = False
-clip_grad = 0.1
-gradient_accumulation_steps = 4
+clip_grad = 1.0
+gradient_accumulation_steps = 1
 
-# Subset of AGCO classes to train/eval on. Boxes for any class not listed here
-# are dropped at dataset load time, so the model never sees them as targets and
-# any prediction that fires on them is penalised as background. Order defines
-# the model class indices (0..K-1).
-included_classes = ("tractor", "harvester", "trailer", "car", "hopper")
+included_classes = ("tractor", "harvester", "trailer")
 num_semcls = len(included_classes)
 num_angle_bin = 12
+max_num_obj = 16
 
-# Utonia's deepest-stage output width (PT-v3m3 enc_channels[-1]).
-UTONIA_ENC_DIM = 576
-
-# ── Model ─────────────────────────────────────────────────────────────────────
+# -- Model --------------------------------------------------------------------
 model = dict(
     type="Model3DETRDetector",
     pre_encoder=dict(
-        type="PTv3m3PreEncoder",
-        pretrained="utonia",
-        grid_size=0.05,  # outdoor LiDAR — coarser than ScanNet's 0.01
-        enc_mode=True,
-        freeze_backbone="enc_finetune",
+        type="PointnetSAPreEncoder",
+        npoint=2048,
+        radius=0.2,
+        nsample=64,
+        mlp_dims=[0, 64, 128, 256],
+        normalize_xyz=True,
     ),
     encoder=dict(
         type="VanillaTransformerEncoder3DETR",
-        encoder_dim=UTONIA_ENC_DIM,
+        encoder_dim=256,
         nhead=4,
         nlayers=3,
         ffn_dim=128,
@@ -75,24 +69,25 @@ model = dict(
         num_angle_bin=num_angle_bin,
         included_classes=included_classes,
     ),
-    encoder_dim=UTONIA_ENC_DIM,
+    encoder_dim=256,
     decoder_dim=256,
-    num_queries=128,
+    num_queries=32,
     position_embedding="fourier",
     mlp_dropout=0.3,
-    projection_norm="ln",
+    center_offset_normalized=True,
     criterion=dict(
         type="SetCriterion3DETR",
+        giou_on_aux_outputs=False,
         matcher_cfg=dict(
             cost_class=1.0,
-            cost_objectness=0.0,
-            cost_giou=2.0,
-            cost_center=0.0,
+            cost_objectness=5.0,
+            cost_giou=3.0,
+            cost_center=5.0,
         ),
         loss_weight_dict=dict(
-            loss_giou_weight=1.0,
+            loss_giou_weight=0.0,
             loss_sem_cls_weight=1.0,
-            loss_no_object_weight=0.25,
+            loss_no_object_weight=0.1,
             loss_angle_cls_weight=0.1,
             loss_angle_reg_weight=0.5,
             loss_center_weight=5.0,
@@ -103,142 +98,143 @@ model = dict(
     ),
 )
 
-# ── Schedule ──────────────────────────────────────────────────────────────────
-epoch = 100
-eval_epoch = 10
+# -- Schedule -----------------------------------------------------------------
+epoch = 720
+eval_epoch = 20
 
 optimizer = dict(type="AdamW", lr=5e-4, weight_decay=0.1)
 scheduler = dict(
     type="OneCycleLR",
     max_lr=[5e-4],
-    pct_start=0.05,
+    pct_start=0.10,
     anneal_strategy="cos",
     div_factor=500.0,
     final_div_factor=1.0,
+    cycle_momentum=False,
 )
 
-# ── Dataset ───────────────────────────────────────────────────────────────────
+# -- Dataset ------------------------------------------------------------------
 dataset_type = "AgcoBBoxV1"
 data_root = "/mnt/data/pointcloud_datasets/Pointcept/agco2026"
 meta_data_dir = "/mnt/data/pointcloud_datasets/Pointcept/agco2026/meta_data"
-sensors = ["lslidar"]
-num_points = 100_000
+sensors = ["rslidar"]
+num_points = 30_000
 
 class_names = list(included_classes)
-min_inliers = 350
+min_inliers = dict(lslidar=350, ouster=200, rslidar=80)
 
-# Shared deterministic crops (lslidar effective range + ±60° FOV wedge).
+fixed_pc_dims = {
+    "lslidar": dict(min=[0.0, -55.0, -11.0], max=[60.0, 55.0, 10.0]),
+    "ouster": dict(min=[0.0, -36.0, -10.0], max=[40.0, 36.0, 8.0]),
+    "rslidar": dict(min=[0.0, -8.5, -8.0], max=[20.0, 8.5, 6.0]),
+}
+
 det_crop_transforms = [
-    dict(type="SphericalCropDetection", max_dist=60.0, min_dist=0.0),
-    dict(type="FovCropDetection", azimuth_deg=(-60.0, 60.0), crop_points=True),
+    dict(
+        type="FovCropDetection",
+        azimuth_deg=(-60, 60),
+        elevation_deg=None,
+        crop_points=True,
+        per_sensor={
+            "lslidar": dict(azimuth_deg=(-60, 60)),
+            "ouster": dict(azimuth_deg=(-60, 60)),
+            "rslidar": dict(azimuth_deg=(-60, 60)),
+        },
+    ),
+    dict(
+        type="SphericalCropDetection",
+        max_dist=60.0,
+        min_dist=1.0,
+        per_sensor={
+            "lslidar": dict(max_dist=60.0),
+            "ouster": dict(max_dist=40.0),
+            "rslidar": dict(max_dist=20.0),
+        },
+    ),
 ]
-
 
 data = dict(
     train=dict(
         type=dataset_type,
         root_dir=data_root,
         meta_data_dir=meta_data_dir,
-
         split="train",
         split_prefix="agco",
         loop=1,
-
         sensors=sensors,
         use_intensity=False,
-        utonia_preprocess=True,
-
         num_points=num_points,
         min_inliers=min_inliers,
         included_classes=included_classes,
-
+        fixed_pc_dims=fixed_pc_dims,
+        max_num_obj=max_num_obj,
         apply_t_rtk=True,
         require_calibration=True,
-
         apply_r_global=True,
-
         apply_r_level_to_boxes=True,
         apply_r_level_to_points=True,
         require_gravity_align=True,
         residual_rpy_warn_deg=10.0,
-
         transform=[
             *det_crop_transforms,
             dict(type="RandomFlipDetection", p_x=0.0, p_y=0.5),
             dict(type="RandomRotateZDetection", angle_deg=(-5.0, 5.0)),
-            dict(type="GridSampleDetection", grid_size=0.05),
             dict(type="PointSubsampleDetection", num_points=num_points),
         ],
     ),
-
     val=dict(
         type=dataset_type,
         root_dir=data_root,
         meta_data_dir=meta_data_dir,
-
-        split="train",
+        split="val",
         split_prefix="agco",
-
         sensors=sensors,
         use_intensity=False,
-        utonia_preprocess=True,
-
         num_points=num_points,
         min_inliers=min_inliers,
         included_classes=included_classes,
-
+        fixed_pc_dims=fixed_pc_dims,
+        max_num_obj=max_num_obj,
         apply_t_rtk=True,
         require_calibration=True,
-
         apply_r_global=True,
-
         apply_r_level_to_boxes=True,
         apply_r_level_to_points=True,
         require_gravity_align=True,
         residual_rpy_warn_deg=10.0,
-
         transform=[
             *det_crop_transforms,
-            dict(type="GridSampleDetection", grid_size=0.05),
             dict(type="PointSubsampleDetection", num_points=num_points),
         ],
     ),
-
     test=dict(
         type=dataset_type,
         root_dir=data_root,
         meta_data_dir=meta_data_dir,
-
-        split="train",
+        split="test",
         split_prefix="agco",
-
         sensors=sensors,
         use_intensity=False,
-        utonia_preprocess=True,
-
         num_points=num_points,
         min_inliers=min_inliers,
         included_classes=included_classes,
-
+        fixed_pc_dims=fixed_pc_dims,
+        max_num_obj=max_num_obj,
         apply_t_rtk=True,
         require_calibration=True,
-
         apply_r_global=True,
-
         apply_r_level_to_boxes=True,
         apply_r_level_to_points=True,
         require_gravity_align=True,
         residual_rpy_warn_deg=10.0,
-
         transform=[
             *det_crop_transforms,
-            dict(type="GridSampleDetection", grid_size=0.05),
             dict(type="PointSubsampleDetection", num_points=num_points),
         ],
     ),
 )
 
-# ── Hooks ─────────────────────────────────────────────────────────────────────
+# -- Hooks --------------------------------------------------------------------
 hooks = [
     dict(type="CheckpointLoader"),
     dict(type="ModelHook"),
@@ -249,5 +245,5 @@ hooks = [
     dict(type="PreciseEvaluator", test_last=False),
 ]
 
-# ── Tester ────────────────────────────────────────────────────────────────────
+# -- Tester -------------------------------------------------------------------
 test = dict(type="ObjDetTester", verbose=True, save_predictions=True)

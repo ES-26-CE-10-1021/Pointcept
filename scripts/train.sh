@@ -47,6 +47,9 @@ while getopts "p:d:c:n:w:g:m:r:" opt; do
       ;;
   esac
 done
+shift $((OPTIND-1))
+# Any remaining args are forwarded as additional --options key=value overrides.
+EXTRA_OPTIONS="$@"
 
 if [ "${NUM_GPU}" = 'None' ]
 then
@@ -105,7 +108,7 @@ then
     --num-machines "$NUM_MACHINE" \
     --machine-rank ${SLURM_NODEID:-0} \
     --dist-url ${DIST_URL} \
-    --options save_path="$EXP_DIR"
+    --options save_path="$EXP_DIR" $EXTRA_OPTIONS
 else
     $PYTHON "$CODE_DIR"/tools/$TRAIN_CODE \
     --config-file "$CONFIG_DIR" \
@@ -113,5 +116,5 @@ else
     --num-machines "$NUM_MACHINE" \
     --machine-rank ${SLURM_NODEID:-0} \
     --dist-url ${DIST_URL} \
-    --options save_path="$EXP_DIR" resume="$RESUME" weight="$WEIGHT"
+    --options save_path="$EXP_DIR" resume="$RESUME" weight="$WEIGHT" $EXTRA_OPTIONS
 fi

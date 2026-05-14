@@ -1,24 +1,23 @@
 """
-3DETR on AGCO — v2m1-1: Utonia VFM + last-stage fine-tune, overfit (5-class, lslidar).
+3DETR on AGCO — v2m1-1-3cls: Utonia VFM + last-stage fine-tune, 3-class, overfit (lslidar).
 
-Same architecture and criterion as v2m1-0-agco; val and test point to
-split="train" for overfit-style diagnostics.
+Same architecture and criterion as v2m1-0-3cls-agco; val and test point
+to split="train" for overfit-style diagnostics.
 
 Architecture:
   PTv3m3PreEncoder (pretrained Utonia, enc_finetune) + Vanilla(576d, 3L)
   + Decoder(256d, 8L). num_queries=128, projection_norm="ln".
-  batch_size=2, gradient_accumulation_steps=4.
 
 Dataset:
-  AgcoBBoxV1, sensors=["lslidar"], num_points=100_000, 5-class,
+  AgcoBBoxV1, sensors=["lslidar"], num_points=100_000, 3-class,
   val/test = train (overfit), gravity-leveled, ±60° FOV + spherical
-  crops, min_inliers=350. utonia_preprocess=True.
+  crops, min_inliers=350.
 
 Criterion:
-  3DETR native (loss_giou=1.0, no objectness/center matcher costs).
+  3DETR native (loss_giou=1.0).
 
 Usage:
-    sh scripts/train.sh -d agco -c det-3detr-v2m1-1-agco -n 3detr_agco_v2_overfit -g 2
+    sh scripts/train.sh -d agco -c det-3detr-v2m1-1-3cls-agco -n 3detr_agco_v2_3cls_overfit -g 2
 """
 
 _base_ = ["../_base_/default_runtime.py"]
@@ -32,11 +31,9 @@ find_unused_parameters = False
 clip_grad = 0.1
 gradient_accumulation_steps = 4
 
-# Subset of AGCO classes to train/eval on. Boxes for any class not listed here
-# are dropped at dataset load time, so the model never sees them as targets and
-# any prediction that fires on them is penalised as background. Order defines
-# the model class indices (0..K-1).
-included_classes = ("tractor", "harvester", "trailer", "car", "hopper")
+# Subset of AGCO classes to train/eval on: only 3 classes (no car, no hopper).
+# Order defines the model class indices (0..K-1).
+included_classes = ("tractor", "harvester", "trailer")
 num_semcls = len(included_classes)
 num_angle_bin = 12
 
@@ -166,7 +163,6 @@ data = dict(
             *det_crop_transforms,
             dict(type="RandomFlipDetection", p_x=0.0, p_y=0.5),
             dict(type="RandomRotateZDetection", angle_deg=(-5.0, 5.0)),
-            dict(type="GridSampleDetection", grid_size=0.05),
             dict(type="PointSubsampleDetection", num_points=num_points),
         ],
     ),
@@ -199,7 +195,6 @@ data = dict(
 
         transform=[
             *det_crop_transforms,
-            dict(type="GridSampleDetection", grid_size=0.05),
             dict(type="PointSubsampleDetection", num_points=num_points),
         ],
     ),
@@ -232,7 +227,6 @@ data = dict(
 
         transform=[
             *det_crop_transforms,
-            dict(type="GridSampleDetection", grid_size=0.05),
             dict(type="PointSubsampleDetection", num_points=num_points),
         ],
     ),

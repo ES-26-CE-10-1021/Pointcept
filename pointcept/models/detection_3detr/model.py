@@ -109,13 +109,36 @@ def point2dense(point):
 
 
 class BoxProcessor:
-    """Converts MLP head outputs into bounding box parameters."""
+    """Converts MLP head outputs into bounding box parameters.
 
-    def __init__(self, dataset_config):
+    Args:
+        dataset_config: dataset config module (e.g. AgcoBBoxConfig).
+        center_offset_normalized: when True, treat the raw `center_offset`
+            as a fraction of `scene_scale` (= point_cloud_dims[1] -
+            point_cloud_dims[0]) rather than as an absolute metric
+            displacement. The center MLP head produces `sigmoid - 0.5`
+            which is in [-0.5, 0.5]; multiplying by scene_scale makes the
+            cap ±0.5·scene_scale (i.e. half the scene span per axis)
+            instead of ±0.5 m. Required for scenes much larger than the
+            ScanNet/SUN-RGBD indoor scale where FPS query spacing exceeds
+            0.5 m, otherwise the regression target is unreachable.
+            Default False preserves the upstream 3DETR behaviour.
+    """
+
+    def __init__(self, dataset_config, center_offset_normalized: bool = False):
         self.dataset_config = dataset_config
+        self.center_offset_normalized = bool(center_offset_normalized)
 
     def compute_predicted_center(self, center_offset, query_xyz, point_cloud_dims):
-        center_unnormalized = query_xyz + center_offset
+        if self.center_offset_normalized:
+            scene_scale = point_cloud_dims[1] - point_cloud_dims[0]
+            scene_scale = torch.clamp(scene_scale, min=1e-1)
+            # scene_scale: (B, 3) → broadcast over the query/layer dims.
+            while scene_scale.dim() < center_offset.dim():
+                scene_scale = scene_scale.unsqueeze(-2)
+            center_unnormalized = query_xyz + center_offset * scene_scale
+        else:
+            center_unnormalized = query_xyz + center_offset
         center_normalized = shift_scale_points(
             center_unnormalized, src_range=point_cloud_dims
         )
@@ -186,6 +209,10 @@ class Model3DETRDetector(nn.Module):
         projection_norm (str): norm for encoder_to_decoder_projection.
             'bn1d' (default, original 3DETR) or 'ln' (LayerNorm, padding-safe).
             Use 'ln' when variable-length padding is present.
+        center_offset_normalized (bool): scale the center MLP offset by
+            scene_scale instead of treating it as raw metres. See
+            ``BoxProcessor`` docstring. Default False (upstream 3DETR
+            behaviour).
     """
 
     def __init__(
@@ -202,6 +229,7 @@ class Model3DETRDetector(nn.Module):
         criterion=None,
         input_feature_dim=0,
         projection_norm="bn1d",
+        center_offset_normalized: bool = False,
     ):
         super().__init__()
 
@@ -254,7 +282,10 @@ class Model3DETRDetector(nn.Module):
         )
 
         self.num_queries = num_queries
-        self.box_processor = BoxProcessor(self.dataset_config)
+        self.box_processor = BoxProcessor(
+            self.dataset_config,
+            center_offset_normalized=center_offset_normalized,
+        )
 
         # Build MLP heads for box parameter prediction
         self._build_mlp_heads(decoder_dim, mlp_dropout)

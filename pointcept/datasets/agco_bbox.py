@@ -42,6 +42,7 @@ line (relative to `root_dir`).
 import json
 import os
 import warnings
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -231,6 +232,20 @@ class AgcoBBoxV1(Dataset):
             ``("tractor", "harvester", "trailer", "car", "hopper")``. When
             customising, pass the same tuple to ``AgcoBBoxConfig`` so the
             detector head's ``num_semcls`` and ``type2class`` agree.
+        fixed_pc_dims (dict | None): if a dict, use fixed per-sensor bounds for
+            normalizing box centers/sizes (and for the
+            ``point_cloud_dims_min/max`` returned to the model). Format:
+            ``{sensor: {"min": [x, y, z], "max": [x, y, z]}}`` with an entry
+            for every sensor in ``sensors``. ``None`` (default) falls back to
+            per-sample min/max of the post-augmentation point cloud — this is
+            unstable across samples for outdoor LiDAR where extents vary.
+        nonempty_oversample (float): if >1.0, duplicate samples that contain at
+            least one kept GT box (after ``min_inliers`` / ``included_classes``
+            filtering). Empty samples are kept once. The multiplier may be
+            fractional: ``2.5`` means each non-empty sample appears 2× plus an
+            extra copy for the first 50% (deterministic, by enumeration order).
+            Default ``1.0`` (no oversampling). Costs one extra JSON read per
+            sample at ``__init__`` time.
         apply_r_level_to_points (bool): if True, rotate point cloud XYZ by
             `R_level`. Default False — matches the visualizer flag default.
         apply_r_level_to_boxes (bool): if True, rotate box centers and
@@ -267,6 +282,8 @@ class AgcoBBoxV1(Dataset):
         dataset_config=None,
         min_inliers=67,
         included_classes=None,
+        nonempty_oversample: float = 1.0,
+        fixed_pc_dims=None,
         apply_r_level_to_points=False,
         apply_r_level_to_boxes=False,
         apply_t_rtk: bool = False,
@@ -278,6 +295,9 @@ class AgcoBBoxV1(Dataset):
         load_segment: bool = False,
         segment_subdir: str = "segment",
         seg_label_map: dict | None = None,
+        max_num_obj: int = 64,
+        sample_allowlist_file: str = None,
+        sample_allowlist_mode: str = "exact",
     ):
         assert split in ("train", "val", "test"), f"Unknown split: {split}"
         assert len(sensors) > 0, "At least one sensor must be specified"
@@ -294,7 +314,7 @@ class AgcoBBoxV1(Dataset):
         self.require_gravity_align = bool(require_gravity_align)
         self.residual_rpy_warn_rad = np.deg2rad(float(residual_rpy_warn_deg))
         self.loop = int(loop)
-        self.max_num_obj = 64
+        self.max_num_obj = int(max_num_obj)
         if isinstance(min_inliers, dict):
             missing = set(self.sensors) - set(min_inliers.keys())
             assert not missing, (
@@ -308,6 +328,38 @@ class AgcoBBoxV1(Dataset):
             else _DEFAULT_INCLUDED_CLASSES
         )
         self.disk_label_to_class = _build_disk_label_to_class(self.included_classes)
+        self.nonempty_oversample = float(nonempty_oversample)
+        assert self.nonempty_oversample >= 1.0, (
+            f"nonempty_oversample must be >= 1.0, got {self.nonempty_oversample}"
+        )
+
+        # Per-sensor fixed normalization bounds. None -> use per-sample min/max
+        # (legacy behavior). Otherwise a dict {sensor: {"min": [..], "max": [..]}}
+        # with an entry for every sensor in `self.sensors`.
+        self.fixed_pc_dims = fixed_pc_dims
+        self._fixed_pc_dims_arr = None
+        if self.fixed_pc_dims is not None:
+            assert isinstance(self.fixed_pc_dims, dict), (
+                f"fixed_pc_dims must be a dict or None, got {type(self.fixed_pc_dims)}"
+            )
+            missing = set(self.sensors) - set(self.fixed_pc_dims.keys())
+            assert not missing, (
+                f"fixed_pc_dims is missing entries for sensors: {sorted(missing)}"
+            )
+            self._fixed_pc_dims_arr = {}
+            for s in self.sensors:
+                entry = self.fixed_pc_dims[s]
+                pc_min = np.asarray(entry["min"], dtype=np.float32)
+                pc_max = np.asarray(entry["max"], dtype=np.float32)
+                assert pc_min.shape == (3,) and pc_max.shape == (3,), (
+                    f"fixed_pc_dims[{s}] min/max must be length-3, got "
+                    f"{pc_min.shape} and {pc_max.shape}"
+                )
+                assert np.all(pc_max > pc_min), (
+                    f"fixed_pc_dims[{s}] requires max > min element-wise; got "
+                    f"min={pc_min.tolist()} max={pc_max.tolist()}"
+                )
+                self._fixed_pc_dims_arr[s] = (pc_min, pc_max)
         self.apply_r_level_to_points = bool(apply_r_level_to_points)
         self.apply_r_level_to_boxes = bool(apply_r_level_to_boxes)
         self.apply_t_rtk = bool(apply_t_rtk)
@@ -319,10 +371,17 @@ class AgcoBBoxV1(Dataset):
         self.load_segment = bool(load_segment)
         self.segment_subdir = str(segment_subdir)
         self.seg_label_map = dict(seg_label_map) if seg_label_map is not None else None
+        self.sample_allowlist_file = sample_allowlist_file
+        self.sample_allowlist_mode = str(sample_allowlist_mode)
         self.center_normalizing_range = [
             np.zeros((1, 3), dtype=np.float32),
             np.ones((1, 3), dtype=np.float32),
         ]
+        if self.sample_allowlist_mode != "exact":
+            raise ValueError(
+                f"Unsupported sample_allowlist_mode='{self.sample_allowlist_mode}'. "
+                "Only 'exact' is supported."
+            )
 
         split_file = os.path.join(meta_data_dir, f"{split_prefix}_{split}.txt")
         with open(split_file, "r") as f:
@@ -379,13 +438,112 @@ class AgcoBBoxV1(Dataset):
                     ):
                         self.samples.append((ridx, sensor, ts))
 
-        print(
-            f"[AgcoBBoxV1] {split}: {len(self.samples)} samples across "
-            f"{len(self.roots)} roots, sensors={list(self.sensors)}"
-        )
+        n_total = len(self.samples)
+
+        if self.sample_allowlist_file:
+            self.samples = self._filter_samples_with_allowlist(self.samples)
+            print(
+                f"[AgcoBBoxV1] {split}: allowlist kept {len(self.samples)} / {n_total} samples"
+            )
+            n_total = len(self.samples)
+
+        if self.nonempty_oversample > 1.0 and n_total > 0:
+            empty_samples = []
+            nonempty_samples = []
+            for s in self.samples:
+                ridx, sensor, ts = s
+                if self._count_kept_boxes(self.roots[ridx], sensor, ts) > 0:
+                    nonempty_samples.append(s)
+                else:
+                    empty_samples.append(s)
+            base = int(np.floor(self.nonempty_oversample))
+            frac = self.nonempty_oversample - base
+            extras = int(round(frac * len(nonempty_samples)))
+            duplicated = nonempty_samples * base + nonempty_samples[:extras]
+            self.samples = empty_samples + duplicated
+            print(
+                f"[AgcoBBoxV1] {split}: oversample={self.nonempty_oversample:g} "
+                f"-> {len(empty_samples)} empty + {len(nonempty_samples)} unique "
+                f"non-empty (×{len(duplicated)/max(1,len(nonempty_samples)):.2f}) "
+                f"= {len(self.samples)} samples (was {n_total})"
+            )
+        else:
+            print(
+                f"[AgcoBBoxV1] {split}: {n_total} samples across "
+                f"{len(self.roots)} roots, sensors={list(self.sensors)}"
+            )
 
     def __len__(self):
         return len(self.samples) * self.loop
+
+    def _normalize_root_path(self, root_str: str) -> str:
+        root_str = root_str.strip()
+        if not root_str:
+            return root_str
+        p = Path(root_str)
+        if not p.is_absolute():
+            p = Path(self.root_dir) / p
+        return str(p.resolve())
+
+    def _load_sample_allowlist(self):
+        path = Path(self.sample_allowlist_file)
+        if not path.is_absolute():
+            path = Path(self.meta_data_dir) / path
+        if not path.is_file():
+            raise FileNotFoundError(
+                f"sample_allowlist_file not found: {path}"
+            )
+
+        allow = set()
+        malformed = 0
+        with open(path, "r") as f:
+            for line_no, raw in enumerate(f, start=1):
+                line = raw.strip()
+                if not line or line.startswith("#"):
+                    continue
+                parts = [x.strip() for x in line.split(",")]
+                if len(parts) != 3:
+                    malformed += 1
+                    continue
+                root_str, sensor, ts = parts
+                allow.add((self._normalize_root_path(root_str), sensor, ts))
+
+        if malformed > 0:
+            warnings.warn(
+                f"{path}: ignored {malformed} malformed allowlist lines; expected '<root>,<sensor>,<timestamp>'",
+                stacklevel=2,
+            )
+
+        if len(allow) == 0:
+            raise ValueError(
+                f"sample_allowlist_file {path} produced an empty allowlist"
+            )
+        return allow, str(path)
+
+    def _filter_samples_with_allowlist(self, samples):
+        allow, allow_path = self._load_sample_allowlist()
+
+        filtered = []
+        seen = set()
+        for ridx, sensor, ts in samples:
+            key = (str(Path(self.roots[ridx]).resolve()), sensor, ts)
+            if key in allow:
+                filtered.append((ridx, sensor, ts))
+                seen.add(key)
+
+        missing = len(allow - seen)
+        if missing > 0:
+            warnings.warn(
+                f"{allow_path}: {missing} allowlist entries did not match any sample",
+                stacklevel=2,
+            )
+
+        if len(filtered) == 0:
+            raise ValueError(
+                f"No samples matched allowlist in {allow_path}. "
+                "Check root paths, sensor names, and timestamps."
+            )
+        return filtered
 
     # ------------------------------------------------------------------
 
@@ -411,6 +569,26 @@ class AgcoBBoxV1(Dataset):
                     [pts, np.zeros((pts.shape[0], 1), dtype=np.float32)], axis=1
                 )
         return pts
+
+    def _count_kept_boxes(self, abs_root, sensor, ts):
+        path = os.path.join(abs_root, sensor, "annotations", f"{ts}.json")
+        with open(path, "r") as f:
+            data = json.load(f)
+        threshold = (
+            self.min_inliers[sensor]
+            if isinstance(self.min_inliers, dict)
+            else self.min_inliers
+        )
+        kept = 0
+        for b in data.get("annotations", []):
+            if not (b.get("is_visible", True) and b.get("inliers", 0) >= threshold):
+                continue
+            if int(b.get("label", -1)) in self.disk_label_to_class:
+                kept += 1
+            for c in b.get("children", []):
+                if int(c.get("label", -1)) in self.disk_label_to_class:
+                    kept += 1
+        return kept
 
     def _load_boxes(self, abs_root, sensor, ts):
         path = os.path.join(abs_root, sensor, "annotations", f"{ts}.json")
@@ -547,6 +725,7 @@ class AgcoBBoxV1(Dataset):
             "gt_box_angles_raw": yaws_raw,
             "gt_box_labels_raw": labels_raw,
             "sensor": sensor,
+            "sample_index": int(idx % len(self.samples)),
         }
         if segment is not None:
             data_dict["segment"] = segment
@@ -614,8 +793,13 @@ class AgcoBBoxV1(Dataset):
             gt_angle_res[i] = res
 
         # Normalized centers / sizes in the point-cloud bbox.
-        point_cloud_dims_min = point_cloud[:, :3].min(axis=0).astype(np.float32)
-        point_cloud_dims_max = point_cloud[:, :3].max(axis=0).astype(np.float32)
+        if self._fixed_pc_dims_arr is not None:
+            point_cloud_dims_min, point_cloud_dims_max = self._fixed_pc_dims_arr[sensor]
+            point_cloud_dims_min = point_cloud_dims_min.copy()
+            point_cloud_dims_max = point_cloud_dims_max.copy()
+        else:
+            point_cloud_dims_min = point_cloud[:, :3].min(axis=0).astype(np.float32)
+            point_cloud_dims_max = point_cloud[:, :3].max(axis=0).astype(np.float32)
         mult_factor = point_cloud_dims_max - point_cloud_dims_min
 
         box_centers_normalized = _shift_scale_points(
