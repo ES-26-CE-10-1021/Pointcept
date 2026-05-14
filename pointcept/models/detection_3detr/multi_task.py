@@ -71,6 +71,16 @@ class MultiTask3DETRSegmentor(nn.Module):
         seg_weight, det_weight: float — only used when
             ``loss_weighting="fixed"``; combined loss is
             ``seg_weight * loss_seg + det_weight * loss_det``.
+        det_fps_npoint: int | None — if set, FPS-subsample the encoder
+            bottleneck tokens to ``det_fps_npoint`` before the detection
+            transformer encoder runs. Mirrors the FPS budget used by the
+            v3m4 / v2m4 detection-only configs. ``None`` (default) keeps
+            the full bottleneck. The seg branch is unaffected (it consumes
+            the decoder output with its original pooling-parent chain).
+        center_offset_normalized: bool — when True, the detection center
+            head produces offsets in normalised scene-scale units that are
+            multiplied by ``point_cloud_dims_max - point_cloud_dims_min``.
+            Match the detection-only configs (``True`` for AGCO).
 
     Uncertainty form (literal Cipolla, see thesis Eq. uncertainty_weighting):
 
@@ -106,6 +116,8 @@ class MultiTask3DETRSegmentor(nn.Module):
         c_det=2.0,
         seg_weight=1.0,
         det_weight=1.0,
+        det_fps_npoint=None,
+        center_offset_normalized=False,
     ):
         super().__init__()
 
@@ -164,7 +176,11 @@ class MultiTask3DETRSegmentor(nn.Module):
             hidden_use_bias=True,
         )
         self.num_queries = int(num_queries)
-        self.box_processor = BoxProcessor(self.dataset_config)
+        self.box_processor = BoxProcessor(
+            self.dataset_config,
+            center_offset_normalized=bool(center_offset_normalized),
+        )
+        self.det_fps_npoint = int(det_fps_npoint) if det_fps_npoint is not None else None
         self._build_mlp_heads(decoder_dim, mlp_dropout)
 
         # ── Loss weighting ────────────────────────────────────────────────
@@ -220,15 +236,24 @@ class MultiTask3DETRSegmentor(nn.Module):
             point = parent
         return point.feat
 
-    def _backbone_forward(self, point):
-        """Manual backbone pass capturing the encoder bottleneck.
+    def _backbone_forward(self, xyz, features):
+        """Backbone pass that exposes both the encoder bottleneck and the
+        decoder output.
 
-        Mirrors ``PointTransformerV3.forward`` (point_transformer_v3m1_base.py:699-707).
-        IMPORTANT: ``self.backbone.dec`` walks the pooling-parent chain
-        in-place and mutates the bottleneck Point, so we must snapshot
-        the bottleneck (xyz / features / padding mask) BEFORE running
-        ``dec``. The seg-side then consumes the (now-mutated) ``dec_point``
-        whose parent chain leads back to the input resolution as usual.
+        Two paths:
+
+        1. **Wrapper-aware** (``backbone.forward_enc_dec_split`` defined):
+           used by ``PTv3m3PreEncoder`` (Utonia), which owns its own input
+           channel padding, ``no_grad`` freezing, and ``_bridge_leaf``
+           reattachment. We delegate to it so freeze semantics are honoured.
+
+        2. **Manual** (raw ``PT-v3m1``): build the ``Point`` here, then call
+           ``embedding`` / ``enc`` / ``dec`` directly. Mirrors
+           ``PointTransformerV3.forward`` (point_transformer_v3m1_base.py:699-707).
+
+        Both paths snapshot the bottleneck (xyz / features / padding mask)
+        BEFORE running ``dec``, because ``dec`` walks the pooling-parent
+        chain in-place and would otherwise consume the parent links.
 
         Returns:
             (enc_xyz, enc_features, padding_mask, dec_point)
@@ -238,6 +263,12 @@ class MultiTask3DETRSegmentor(nn.Module):
                 - dec_point:    Point at first-encoder-stage resolution
                                 with the unpool parent chain still attached
         """
+        if hasattr(self.backbone, "forward_enc_dec_split"):
+            return self.backbone.forward_enc_dec_split(xyz, features)
+
+        point = dense2point(xyz, features)
+        point["grid_size"] = self.backbone_grid_size
+
         point.serialization(
             order=self.backbone.order, shuffle_orders=self.backbone.shuffle_orders
         )
@@ -252,6 +283,44 @@ class MultiTask3DETRSegmentor(nn.Module):
 
         dec_point = self.backbone.dec(enc_point)
         return enc_xyz, enc_features, padding_mask, dec_point
+
+    def _det_fps_subsample(self, enc_xyz, enc_features, padding_mask):
+        """FPS-subsample the encoder bottleneck to ``self.det_fps_npoint``
+        tokens before the detection transformer encoder runs.
+
+        Mirrors the FPS-budget pattern used by the v3m4 / v2m4 detection-only
+        configs (which apply FPS inside the pre_encoder). Padded positions
+        are pushed to ``1e6`` so FPS never selects them, and the padding
+        mask is gathered to track the new layout. Same pattern as
+        ``_det_get_query_embeddings``.
+        """
+        if padding_mask is not None:
+            fps_xyz = enc_xyz.clone()
+            fps_xyz[padding_mask] = 1e6
+        else:
+            fps_xyz = enc_xyz
+
+        fps_inds = furthest_point_sample(fps_xyz, self.det_fps_npoint).long()
+
+        if padding_mask is not None:
+            on_padded = torch.gather(padding_mask, 1, fps_inds)
+            if on_padded.any():
+                first_real = (~padding_mask).long().argmax(dim=1, keepdim=True)
+                fps_inds = torch.where(
+                    on_padded, first_real.expand_as(fps_inds), fps_inds
+                )
+            padding_mask = torch.gather(padding_mask, 1, fps_inds)
+
+        new_xyz = torch.gather(
+            enc_xyz, 1, fps_inds.unsqueeze(-1).expand(-1, -1, 3)
+        )
+        # enc_features is (N', B, C); gather along dim 0.
+        N_old, B, C = enc_features.shape
+        feat_gather_inds = (
+            fps_inds.transpose(0, 1).unsqueeze(-1).expand(-1, -1, C)
+        )  # (npoint, B, C)
+        new_features = torch.gather(enc_features, 0, feat_gather_inds)
+        return new_xyz, new_features, padding_mask
 
     # ------------------------------------------------------------------ detection-branch helpers
     def _det_run_encoder(self, enc_xyz, enc_features, padding_mask):
@@ -381,25 +450,27 @@ class MultiTask3DETRSegmentor(nn.Module):
 
     # ------------------------------------------------------------------ forward
     def forward(self, input_dict):
-        # ── 1. Build dense Point from (B, N, 3+C) tensor. ────────────────
+        # ── 1. Unpack the dense (B, N, 3+C) batch. ───────────────────────
         pc = input_dict["point_clouds"]
         xyz = pc[..., :3].contiguous()
         features = (
             pc[..., 3:].permute(0, 2, 1).contiguous() if pc.shape[-1] > 3 else None
         )
-        point = dense2point(xyz, features)
-        point["grid_size"] = self.backbone_grid_size
 
-        # ── 2. Manual backbone forward, capturing bottleneck. ────────────
+        # ── 2. Backbone forward, capturing bottleneck + decoder output. ──
         enc_xyz, enc_features, det_padding_mask, dec_point = (
-            self._backbone_forward(point)
+            self._backbone_forward(xyz, features)
         )
 
         # ── 3. Seg branch: unpool to root resolution + linear head. ──────
         seg_feat = self._unpool_to_root(dec_point)
         seg_logits = self.seg_head(seg_feat)  # (B*N, num_seg_classes)
 
-        # ── 4. Detection branch: 3DETR enc → projection → queries → dec. ─
+        # ── 4. Detection branch: optional FPS → 3DETR enc → proj → dec. ──
+        if self.det_fps_npoint is not None:
+            enc_xyz, enc_features, det_padding_mask = self._det_fps_subsample(
+                enc_xyz, enc_features, det_padding_mask
+            )
         enc_xyz, enc_features, det_padding_mask = self._det_run_encoder(
             enc_xyz, enc_features, det_padding_mask
         )
