@@ -48,6 +48,62 @@ dense-tensor interface 3DETR expects `(xyz, features)` with PTv3's
 Both classes are registered with `MODULES` under the names
 `"PTv3PreEncoder"` and `"PTv3UNetPreEncoder"` respectively.
 
+- **`PTv3m3PreEncoder`** (`PT-v3m3`, Utonia — frozen VFM, `enc_mode=True`)
+  - Subclasses `PointTransformerV3` from
+    `pointcept.models.point_transformer_v3.point_transformer_v3m3_utonia`
+    (the Utonia variant of PTv3, with Point3DRoPE and a slightly different
+    forward ordering) and is registered as `"PTv3m3PreEncoder"`.
+  - Pulls the pretrained checkpoint from HuggingFace via
+    `third_party.utonia.utonia.model.load(name=..., ckpt_only=True)`. The
+    download is wrapped in a DDP-safe rank-0 + barrier pattern so the
+    first-run HF fetch doesn't hammer the lock file from every rank.
+  - The full backbone hyperparameter set (`in_channels`, `enc_depths`,
+    `enc_channels`, `enc_num_head`, `rope_base`, …) is driven by the
+    checkpoint config bundled with the download. The detection config
+    only needs `pretrained`, `grid_size`, `enc_mode`, `freeze_backbone`
+    (`"enc"` | `"enc_finetune"` | `"none"`), and optional
+    `config_overrides`.
+  - **Zero-padding hack.** The ScanNet detection dataset only provides
+    xyz (and optionally rgb), while Utonia was pretrained on a 9-ch
+    `[xyz, rgb, normal]` input. `_build_padded_feat` assembles a
+    `(B, target_c, N)` tensor on-device with xyz, then rgb if available,
+    then zero-filled channels for any remaining slots. `target_c` is read
+    at runtime from `self.embedding.in_channels` so it tracks whatever
+    the checkpoint was trained with. Causal Modality Blinding makes
+    Utonia tolerate absent modalities as long as they're explicit zeros.
+  - **Backbone training policy via `freeze_backbone`:**
+    1. `"enc"` (default) freezes embedding + encoder, keeps decoder
+       (if present) trainable.
+    2. `"enc_finetune"` freezes everything except the last encoder stage.
+    3. `"none"` keeps the full backbone trainable end-to-end.
+  - Uses the same `(xyz, features)` ↔ `Point` bridge as the other
+    adapters, so the rest of the 3DETR pipeline (padding mask through
+    cross-attention, FPS query sampling, LN projection) remains
+    unchanged.
+
+### Utonia variant — `det-3detr-utonia-v1m1-0-scannet.py`
+
+- Uses `PTv3m3PreEncoder(pretrained="utonia", grid_size=0.02,
+  enc_mode=True, freeze_backbone="enc")` as the
+  pre-encoder. The full Utonia hyperparameter set comes from the
+  HuggingFace checkpoint; the config only pins what's policy.
+- `encoder_dim = 576` (Utonia's deepest-stage output width) on both
+  the `VanillaTransformerEncoder3DETR` and the root
+  `encoder_to_decoder_projection`. `decoder_dim = 256` unchanged.
+- Keeps `projection_norm="ln"` (the PT-v3m3 output is still
+  variable-length per scene).
+- The `CheckpointLoader` hook is left bare — Utonia weights are
+  fetched inside the pre-encoder, not via the loader's
+  `keywords`/`replacement` remap.
+- First-run HF download note: under DDP the rank-0 + barrier dance can
+  still time out if the 137M-parameter file has to download over a slow
+  link. For production training, warm the cache once before launching
+  with ``python -c "from third_party.utonia.utonia.model import load;
+  load(name='utonia', ckpt_only=True)"``.
+- For partial/full finetuning ablations, switch
+  `freeze_backbone="enc_finetune"` (last encoder stage trainable) or
+  `freeze_backbone="none"` (full backbone trainable).
+
 ### `pointcept/models/detection_3detr/model.py`
 
 - **Variable-length handling.** `run_encoder()` accepts variable-length
@@ -74,6 +130,13 @@ Both classes are registered with `MODULES` under the names
   including the padding-mask and gradient-flow edge cases.
 - `tests/test_ptv3_3detr_integration.py` — end-to-end forward/backward of
   `PTv3PreEncoder` wired into `Model3DETRDetector`.
+- `tests/test_utonia_3detr_integration.py` — parallel suite for
+  `PTv3m3PreEncoder`: forward shape, the zero-padding helper, frozen
+  `requires_grad`/`eval` invariants, the no_grad detach + re-enable
+  bridge, a peak-VRAM regression guard, and an end-to-end tiny
+  `Model3DETRDetector` forward+backward. A separate `test_utonia_load_hf`
+  exercises the real HuggingFace download path when
+  `RUN_UTONIA_HF_TEST=1` is set.
 - `tests/test_3detr_cross_validation.py` — audit of how the Pointcept
   config differs from the native 3DETR defaults.
 - `tests/test_lr_schedule_comparison.py` — sanity check that the
@@ -122,18 +185,27 @@ actually prevent them from affecting BN mean/variance.
 | ----------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `det-3detr-v4m1-0-scannet.py` | `PTv3UNetPreEncoder` — full PTv3 U-Net (encoder + decoder) producing dense features at the initial voxel grid. Handed directly to the 3DETR decoder via `IdentityEncoder3DETR`; the rationale is that the U-Net's multi-scale skip connections already provide the cross-scale context that a transformer encoder would otherwise add. |
 
+### Frozen Utonia pre-encoder (utonia-v1)
+
+| Config                                   | Notes                                                                                                                                                                                                                                                                                            |
+| ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `det-3detr-utonia-v1m1-0-scannet.py`     | `PTv3m3PreEncoder(pretrained="utonia")` — pretrained Utonia VFM (PT-v3m3) run as a frozen feature extractor, followed by a 3-layer `VanillaTransformerEncoder3DETR` at `encoder_dim=576`. Utonia weights never receive gradients. Missing modalities (normals, optionally rgb) are zero-padded on-device. |
+
 ## Quick mental map
 
 ```
- PointNet++ SA ─┐
-                │
- PTv3 enc-only ─┼─▶ [optional encoder: Identity | Vanilla | Masked] ─▶ 3DETR decoder
-    (+ FPS?)    │
-                │
- PTv3 U-Net ────┘
+ PointNet++ SA      ─┐
+                     │
+ PTv3 enc-only       ─┤
+    (+ FPS?)         │
+                     ├─▶ [optional encoder: Identity | Vanilla | Masked] ─▶ 3DETR decoder
+ PTv3 U-Net         ─┤
+                     │
+ Utonia (frozen m3) ─┘
 
  Variable-length path uses padding_mask + LN projection.
  Fixed-length path (PointNet++ SA, PTv3 + FPS) also uses LN for consistency.
+ The Utonia path is variable-length and uses the same LN projection.
 ```
 
 ## Status at time of writing (2026-04-10)

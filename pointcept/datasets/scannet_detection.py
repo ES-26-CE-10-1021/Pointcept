@@ -122,6 +122,7 @@ class ScanNetDetectionDataset(Dataset):
         augment=False,
         random_cuboid_min_points=30000,
         loop=1,
+        utonia_preprocess=False,
     ):
         assert split in ("train", "val"), f"Unknown split: {split}"
         self.root_dir = root_dir
@@ -131,6 +132,7 @@ class ScanNetDetectionDataset(Dataset):
         self.augment = augment
         self.random_cuboid_min_points = random_cuboid_min_points
         self.loop = loop
+        self.utonia_preprocess = utonia_preprocess
 
         self.nyu40id2class = {
             nyu40id: i for i, nyu40id in enumerate(list(DETECTION_NYU40_IDS))
@@ -209,7 +211,10 @@ class ScanNetDetectionDataset(Dataset):
             pcl_color = mesh_vertices[:, 3:6]
         else:
             point_cloud = mesh_vertices[:, 0:6]
-            point_cloud[:, 3:] = (point_cloud[:, 3:] - MEAN_COLOR_RGB) / 256.0
+            if self.utonia_preprocess:
+                point_cloud[:, 3:] = point_cloud[:, 3:] / 255.0
+            else:
+                point_cloud[:, 3:] = (point_cloud[:, 3:] - MEAN_COLOR_RGB) / 256.0
             pcl_color = point_cloud[:, 3:]
 
         if self.use_height:
@@ -253,6 +258,20 @@ class ScanNetDetectionDataset(Dataset):
         num_gt = min(instance_bboxes.shape[0], MAX_NUM_OBJ)
         target_bboxes_mask[:num_gt] = 1
         target_bboxes[:num_gt, :] = instance_bboxes[:num_gt, 0:6]
+
+        # Utonia-canonical preprocessing (scale=0.5, CenterShift z+)
+        # Must run before flip/rotation augmentation and box normalization.
+        if self.utonia_preprocess:
+            # RandomScale(0.5): halve XYZ coords, box centers, and box sizes
+            point_cloud[:, 0:3] *= 0.5
+            target_bboxes[:, 0:3] *= 0.5   # centers
+            target_bboxes[:, 3:6] *= 0.5   # sizes
+            # CenterShift(apply_z=True): shift XY to mean, Z to min
+            x_min, y_min, z_min = point_cloud[:, 0:3].min(axis=0)
+            x_max, y_max, _ = point_cloud[:, 0:3].max(axis=0)
+            shift = np.array([(x_min + x_max) / 2, (y_min + y_max) / 2, z_min])
+            point_cloud[:, 0:3] -= shift
+            target_bboxes[:, 0:3] -= shift   # centers only; sizes unaffected
 
         # --- Data augmentation ---
         if self.augment:
