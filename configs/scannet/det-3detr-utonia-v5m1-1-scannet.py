@@ -17,10 +17,10 @@ _base_ = ["../_base_/default_runtime.py"]
 
 # ── Training ─────────────────────────────────────────────────────────────────
 batch_size = 8
-num_worker = 32
+num_worker = 16
 mix_prob = 0
 enable_amp = False
-find_unused_parameters = False
+find_unused_parameters = True
 clip_grad = 0.1
 
 UTONIA_ENC_DIM = 576
@@ -118,9 +118,14 @@ data = dict(
         num_points=40000,
         use_color=True,
         use_height=False,
-        augment=True,
-        random_cuboid_min_points=30000,
         utonia_preprocess=True,
+        transform=[
+            dict(type="RandomCuboidDetection", min_points=30000),
+            dict(type="RandomFlipDetection", p_x=0.5, p_y=0.5),
+            dict(type="RandomRotateZDetection", angle_deg=(-5.0, 5.0)),
+            dict(type="GridSampleDetection", grid_size=0.01),
+            dict(type="PointSubsampleDetection", num_points=40000),
+        ],
     ),
     val=dict(
         type=dataset_type,
@@ -130,8 +135,11 @@ data = dict(
         num_points=40000,
         use_color=True,
         use_height=False,
-        augment=False,
         utonia_preprocess=True,
+        transform=[
+            dict(type="GridSampleDetection", grid_size=0.01),
+            dict(type="PointSubsampleDetection", num_points=40000),
+        ],
     ),
     test=dict(
         type=dataset_type,
@@ -141,8 +149,11 @@ data = dict(
         num_points=40000,
         use_color=True,
         use_height=False,
-        augment=False,
         utonia_preprocess=True,
+        transform=[
+            dict(type="GridSampleDetection", grid_size=0.01),
+            dict(type="PointSubsampleDetection", num_points=40000),
+        ],
     ),
 )
 
