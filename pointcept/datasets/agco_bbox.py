@@ -193,8 +193,12 @@ class AgcoBBoxV1(Dataset):
         num_points (int): points subsampled per scan. Enforced as a final
             safety-net even if the ``transform`` pipeline doesn't include
             ``PointSubsampleDetection``.
-        use_intensity (bool): if True, append per-point intensity as a 4th
-            channel when intensity .npy is present; otherwise zeros.
+        use_intensity (bool): if True, append per-point intensity as an
+            extra channel when intensity .npy is present; otherwise zeros.
+        use_color (bool): if True, load per-point RGB from
+            ``<sensor>/color/<ts>.npy`` (float32, shape ``(N, 3)``, values
+            in ``[0, 1]``) and concatenate it to the point cloud directly
+            after XYZ. Canonical channel order is ``[xyz, rgb, intensity]``.
         utonia_preprocess (bool): if True, right-pad ``point_clouds`` with
             zero-channels so the per-point feature width is 9
             ``[xyz, rgb=0, normal=0]``, matching the Utonia (PT-v3m3)
@@ -274,6 +278,7 @@ class AgcoBBoxV1(Dataset):
         sensors=("lslidar",),
         num_points=80000,
         use_intensity=False,
+        use_color=False,
         utonia_preprocess=False,
         transform=None,
         require_gravity_align=True,
@@ -305,6 +310,7 @@ class AgcoBBoxV1(Dataset):
         self.sensors = tuple(sensors)
         self.num_points = int(num_points)
         self.use_intensity = bool(use_intensity)
+        self.use_color = bool(use_color)
         self.utonia_preprocess = bool(utonia_preprocess)
         from .transform import Compose
         self.transform = Compose(transform or [])
@@ -551,6 +557,17 @@ class AgcoBBoxV1(Dataset):
                 f"Unexpected point cloud shape {pts.shape} at {coord_path}"
             )
         pts = pts[:, :3]
+        if self.use_color:
+            color_path = os.path.join(
+                abs_root, sensor, "color", f"{ts}.npy"
+            )
+            rgb = np.load(color_path).astype(np.float32)
+            if rgb.ndim != 2 or rgb.shape != (pts.shape[0], 3):
+                raise ValueError(
+                    f"Unexpected color shape {rgb.shape} at {color_path}; "
+                    f"expected ({pts.shape[0]}, 3)"
+                )
+            pts = np.concatenate([pts, rgb], axis=1)
         if self.use_intensity:
             intensity_path = os.path.join(
                 abs_root, sensor, "pointcloud_raw", "intensity", f"{ts}.npy"

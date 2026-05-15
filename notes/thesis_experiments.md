@@ -161,6 +161,72 @@ loss for AGCO).
   Utonia) on outdoor point counts (40k–100k) require more memory than the
   ScanNet defaults; v1m3-0 keeps `batch_size=8`.
 
+## Color ablation (added 2026-05-15)
+
+A second ScanNet/AGCO triple was added to ablate **per-point RGB** as an
+input modality, holding everything else identical to the headline triples.
+The ScanNet headline Utonia run (`det-3detr-utonia-v5m1-1-scannet.py`)
+silently uses `use_color=True` because the pretrained PT-v3m3 checkpoint
+expects 9 input channels; to make the ScanNet row strictly comparable, a
+new `-nocolor` variant of that config was created as the fair baseline.
+
+**Utonia 9-channel guarantee.** Across all configurations the PT-v3m3
+embedding sees exactly 9 channels. When color is off, the missing RGB
+slot is zero-filled (model-side via
+`PTv3m3PreEncoder._build_padded_feat`, dataset-side on AGCO via the
+existing `utonia_preprocess` zero-pad).
+
+### Runs
+
+| # | Backbone slot | Dataset / sensor | Config |
+|---|---|---|---|
+| C1 | Base 3DETR + color | ScanNet | `configs/scannet/det-3detr-v0m1-0-scannet-color.py` |
+| C2 | PTv3 + FPS + color | ScanNet | `configs/scannet/det-3detr-v3m1-1-scannet-color.py` |
+| C3 | Utonia `enc_finetune` + FPS, **no color** | ScanNet | `configs/scannet/det-3detr-utonia-v5m1-1-scannet-nocolor.py` |
+| C4 | Base 3DETR + color | AGCO / ouster | `configs/agco/det-3detr-v1m3-0-3cls-agco-color-ouster.py` |
+| C5 | PTv3 + FPS + color | AGCO / ouster | `configs/agco/det-3detr-v3m4-0-3cls-agco-color-ouster.py` |
+| C6 | Utonia `enc_finetune` + FPS + color | AGCO / ouster | `configs/agco/det-3detr-v2m4-0-3cls-agco-color-ouster.py` |
+
+### Diffs vs the headline triples
+
+| Backbone | Color-config delta |
+|---|---|
+| Base 3DETR (PointNet++) | `use_color=True` in train/val/test; `PointnetSAPreEncoder.mlp_dims[0]: 0 → 3` |
+| PTv3 from scratch | `use_color=True`; `PTv3PreEncoder.in_channels: 3 → 6` |
+| Utonia (PT-v3m3) | `use_color=True/False` only — `_build_padded_feat` (or AGCO `utonia_preprocess`) keeps the 9-channel layout |
+
+### Dataset support
+
+- **ScanNet**: `ScanNetDetectionDataset` already had `use_color=True`
+  plumbed (`pointcept/datasets/scannet_detection.py:209`); no change.
+- **AGCO**: `AgcoBBoxV1` gained a `use_color: bool = False` kwarg. When
+  enabled, `_load_scan()` reads
+  `<root>/<sensor>/color/<timestamp>.npy` (float32, `(N, 3)`, values in
+  `[0, 1]`) and concatenates RGB after XYZ — canonical layout
+  `[xyz, rgb, intensity]`.
+
+### Launch commands
+
+```bash
+# ScanNet color triple
+sh scripts/train.sh -d scannet -c det-3detr-v0m1-0-scannet-color           -n thesis_scannet_base_3detr_color_720ep         -g 2
+sh scripts/train.sh -d scannet -c det-3detr-v3m1-1-scannet-color           -n thesis_scannet_ptv3_fps_color_720ep           -g 2
+sh scripts/train.sh -d scannet -c det-3detr-utonia-v5m1-1-scannet-nocolor  -n thesis_scannet_utonia_encft_fps_nocolor_720ep -g 4
+
+# AGCO color triple (ouster)
+sh scripts/train.sh -d agco -c det-3detr-v1m3-0-3cls-agco-color-ouster -n 3detr_agco_v1m3_color_sunloss_3cls_ouster_720ep         -g 1
+sh scripts/train.sh -d agco -c det-3detr-v3m4-0-3cls-agco-color-ouster -n 3detr_agco_v3m4_ptv3_fps_color_sunloss_3cls_ouster_720ep -g 1
+sh scripts/train.sh -d agco -c det-3detr-v2m4-0-3cls-agco-color-ouster -n 3detr_agco_v2m4_utonia_fps_color_sunloss_3cls_ouster_720ep -g 1
+```
+
+SLURM scripts (both clusters, matching file names under each tree):
+- `third_party/slurm_scripts/{ai-lab,agco-cluster}/pointcept/3detr/scannet/v0m1-color.slurm`
+- `third_party/slurm_scripts/{ai-lab,agco-cluster}/pointcept/3detr/scannet/v3m1-1-color.slurm`
+- `third_party/slurm_scripts/{ai-lab,agco-cluster}/pointcept/3detr/scannet/utonia-v5m1-1-nocolor.slurm`
+- `third_party/slurm_scripts/{ai-lab,agco-cluster}/pointcept/3detr/agco_bbox/ouster/v1m3_3cls_color.slurm`
+- `third_party/slurm_scripts/{ai-lab,agco-cluster}/pointcept/3detr/agco_bbox/ouster/v3m4_3cls_color.slurm`
+- `third_party/slurm_scripts/{ai-lab,agco-cluster}/pointcept/3detr/agco_bbox/ouster/v2m4_3cls_color.slurm`
+
 ### Ablations preserved
 
 The following configs are not part of the thesis-headline triple, but are kept
