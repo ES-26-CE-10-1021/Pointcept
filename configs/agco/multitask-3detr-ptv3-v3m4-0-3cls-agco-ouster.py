@@ -9,7 +9,7 @@ from the multi-task scaffold. Architecture:
                                                                      │
                                   ┌──────────────────────────────────┘
                                   │
-            FPS 2048 ─► Vanilla encoder (3L, 256d) ─► proj ─► 3DETR decoder ─► boxes
+            FPS 2048 ─► Vanilla encoder (3L, 512d, ffn=128) ─► proj ─► 3DETR decoder ─► boxes
                                   │
             decoder (PT-v3m1 U-Net, dec_channels=(64,64,128,256)) ─► unpool ─► Linear ─► seg_logits
 
@@ -68,8 +68,8 @@ model = dict(
         order=("z", "z-trans", "hilbert", "hilbert-trans"),
         stride=(2, 2, 2, 2),
         enc_depths=(2, 2, 2, 6, 2),
-        enc_channels=(32, 64, 128, 256, 256),
-        enc_num_head=(2, 4, 8, 16, 16),
+        enc_channels=(32, 64, 128, 256, 512),
+        enc_num_head=(2, 4, 8, 16, 32),
         enc_patch_size=(1024, 1024, 1024, 1024, 1024),
         dec_depths=(2, 2, 2, 2),
         dec_channels=(64, 64, 128, 256),
@@ -106,7 +106,7 @@ model = dict(
     seg_ignore_index=seg_ignore_index,
     det_encoder=dict(
         type="VanillaTransformerEncoder3DETR",
-        encoder_dim=256,
+        encoder_dim=512,
         nhead=4,
         nlayers=3,
         ffn_dim=128,
@@ -147,7 +147,7 @@ model = dict(
         num_semcls=num_semcls,
         num_angle_bin=num_angle_bin,
     ),
-    encoder_dim=256,
+    encoder_dim=512,
     decoder_dim=256,
     num_queries=32,
     position_embedding="fourier",
