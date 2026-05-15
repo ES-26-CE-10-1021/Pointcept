@@ -59,14 +59,12 @@ skip_no_cuda = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA re
 # Head dims must be divisible by 3 (Point3DRoPE constraint).
 # Stage widths / heads pick head_dim=6 throughout:
 #   enc_channels=(12,24,48), enc_num_head=(2,4,8) → 6,6,6
-# enc_mode is forced on by the adapter; dec_* defaults are unused.
+# enc_mode is user-selectable; dec_* defaults are unused unless enabled.
 TINY_UTONIA_CFG = dict(
     type="PTv3m3PreEncoder",
     pretrained=None,
     grid_size=0.02,
-    freeze=True,
-    freeze_eval=True,
-    freeze_no_grad=True,
+    freeze_backbone="enc",
     # Backbone config (merged into super().__init__ via **overrides).
     in_channels=9,
     order=("z", "z-trans"),
