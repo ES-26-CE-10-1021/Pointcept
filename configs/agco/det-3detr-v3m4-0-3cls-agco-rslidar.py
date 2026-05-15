@@ -2,10 +2,14 @@
 3DETR on AGCO — v3m4-0-3cls-rslidar: PTv3 + FPS 2048 + Vanilla encoder + SUN-like loss (rslidar).
 
 Architecture:
-  PTv3PreEncoder (grid_size=0.05, npoint=2048 FPS, encoder_dim=256)
-  + VanillaTransformerEncoder3DETR(256d, 3L)
+  PTv3PreEncoder (grid_size=0.05, npoint=2048 FPS,
+    enc_channels=(32,64,128,256,512), enc_num_head=(2,4,8,16,32))
+  + VanillaTransformerEncoder3DETR(512d, 3L, ffn=128)
   + TransformerDecoder3DETR(256d, 8L). num_queries=32,
   center_offset_normalized=True, projection_norm="ln", max_num_obj=16.
+
+Backbone width matches v3m3 (512d final PTv3 stage) so v3m3 vs v3m4 is a
+clean "identity encoder vs FPS-2048 + 3L vanilla encoder" ablation.
 
 Dataset:
   AgcoBBoxV1, sensors=["rslidar"], num_points=30_000, 3-class, normal
@@ -47,8 +51,8 @@ model = dict(
         order=("z", "z-trans", "hilbert", "hilbert-trans"),
         stride=(2, 2, 2, 2),
         enc_depths=(2, 2, 2, 6, 2),
-        enc_channels=(32, 64, 128, 256, 256),
-        enc_num_head=(2, 4, 8, 16, 16),
+        enc_channels=(32, 64, 128, 256, 512),
+        enc_num_head=(2, 4, 8, 16, 32),
         enc_patch_size=(1024, 1024, 1024, 1024, 1024),
         mlp_ratio=4,
         qkv_bias=True,
@@ -71,7 +75,7 @@ model = dict(
     ),
     encoder=dict(
         type="VanillaTransformerEncoder3DETR",
-        encoder_dim=256,
+        encoder_dim=512,
         nhead=4,
         nlayers=3,
         ffn_dim=128,
@@ -91,7 +95,7 @@ model = dict(
         num_angle_bin=num_angle_bin,
         included_classes=included_classes,
     ),
-    encoder_dim=256,
+    encoder_dim=512,
     decoder_dim=256,
     num_queries=32,
     position_embedding="fourier",
