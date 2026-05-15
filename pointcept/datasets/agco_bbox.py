@@ -557,12 +557,20 @@ class AgcoBBoxV1(Dataset):
                 f"Unexpected point cloud shape {pts.shape} at {coord_path}"
             )
         pts = pts[:, :3]
+        # Some sensors (e.g. Ouster) store an organized grid where invalid
+        # returns are encoded as zero-range points. Drop those so the cloud
+        # only contains real returns and lines up with the segment / intensity
+        # files (which are valid-only).
+        valid_mask = np.any(pts != 0, axis=1)
+        pts = pts[valid_mask]
         if self.use_intensity:
             intensity_path = os.path.join(
                 abs_root, sensor, "pointcloud_raw", "intensity", f"{ts}.npy"
             )
             if os.path.isfile(intensity_path):
                 intensity = np.load(intensity_path).astype(np.float32)
+                if intensity.shape[0] == valid_mask.shape[0]:
+                    intensity = intensity[valid_mask]
                 pts = np.concatenate([pts, intensity[:, None]], axis=1)
             else:
                 pts = np.concatenate(
