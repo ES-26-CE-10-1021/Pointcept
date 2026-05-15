@@ -60,8 +60,9 @@ Both classes are registered with `MODULES` under the names
   - The full backbone hyperparameter set (`in_channels`, `enc_depths`,
     `enc_channels`, `enc_num_head`, `rope_base`, …) is driven by the
     checkpoint config bundled with the download. The detection config
-    only needs `pretrained`, `grid_size`, the three freeze toggles, and
-    optional `config_overrides`.
+    only needs `pretrained`, `grid_size`, `enc_mode`, `freeze_backbone`
+    (`"enc"` | `"enc_finetune"` | `"none"`), and optional
+    `config_overrides`.
   - **Zero-padding hack.** The ScanNet detection dataset only provides
     xyz (and optionally rgb), while Utonia was pretrained on a 9-ch
     `[xyz, rgb, normal]` input. `_build_padded_feat` assembles a
@@ -70,17 +71,11 @@ Both classes are registered with `MODULES` under the names
     at runtime from `self.embedding.in_channels` so it tracks whatever
     the checkpoint was trained with. Causal Modality Blinding makes
     Utonia tolerate absent modalities as long as they're explicit zeros.
-  - **Frozen backbone via three independent mechanisms:**
-    1. `freeze=True` → base-class `freeze_encoder=True` sets
-       `requires_grad=False` on the embedding + encoder parameters.
-    2. `freeze_eval=True` → overridden `train()` forces the embedding
-       and encoder into eval mode on every step, so dropout /
-       drop_path / stochastic depth don't randomize frozen features.
-    3. `freeze_no_grad=True` → the backbone forward runs under
-       `torch.no_grad()` so autograd never builds a graph over its ops
-       (the VRAM fix). On exit we detach the output feat and, in
-       training mode, flip `requires_grad_(True)` so downstream layers
-       can attach a fresh graph at that leaf.
+  - **Backbone training policy via `freeze_backbone`:**
+    1. `"enc"` (default) freezes embedding + encoder, keeps decoder
+       (if present) trainable.
+    2. `"enc_finetune"` freezes everything except the last encoder stage.
+    3. `"none"` keeps the full backbone trainable end-to-end.
   - Uses the same `(xyz, features)` ↔ `Point` bridge as the other
     adapters, so the rest of the 3DETR pipeline (padding mask through
     cross-attention, FPS query sampling, LN projection) remains
@@ -89,7 +84,7 @@ Both classes are registered with `MODULES` under the names
 ### Utonia variant — `det-3detr-utonia-v1m1-0-scannet.py`
 
 - Uses `PTv3m3PreEncoder(pretrained="utonia", grid_size=0.02,
-  freeze=True, freeze_eval=True, freeze_no_grad=True)` as the
+  enc_mode=True, freeze_backbone="enc")` as the
   pre-encoder. The full Utonia hyperparameter set comes from the
   HuggingFace checkpoint; the config only pins what's policy.
 - `encoder_dim = 576` (Utonia's deepest-stage output width) on both
@@ -105,11 +100,9 @@ Both classes are registered with `MODULES` under the names
   link. For production training, warm the cache once before launching
   with ``python -c "from third_party.utonia.utonia.model import load;
   load(name='utonia', ckpt_only=True)"``.
-- Intentional divergence from Utonia's downstream segmentation recipe:
-  segmentation leaves dropout active on the frozen backbone, whereas we
-  force eval for deterministic features and VRAM savings. The
-  `freeze_eval=False` / `freeze_no_grad=False` toggles make the
-  ablation trivial.
+- For partial/full finetuning ablations, switch
+  `freeze_backbone="enc_finetune"` (last encoder stage trainable) or
+  `freeze_backbone="none"` (full backbone trainable).
 
 ### `pointcept/models/detection_3detr/model.py`
 
