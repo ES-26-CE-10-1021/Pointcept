@@ -2371,3 +2371,293 @@ class CombinedSegDetTester(TesterBase):
     def collate_fn(batch):
         from torch.utils.data.dataloader import default_collate
         return default_collate(batch)
+
+
+@TESTERS.register_module()
+class AgcoSemSegDenseTester(TesterBase):
+    """Seg-only tester for the AGCO dense ``(B, N, 3+C)`` pipeline.
+
+    Pairs with ``Dense3DETRSegmentor``, which returns ``dict(seg_logits)`` in
+    eval mode. Mirrors the segmentation half of ``CombinedSegDetTester``:
+    accumulates per-class IoU/Acc via ``intersection_and_union_gpu`` and
+    optionally writes per-scan predictions to ``<save_path>/predictions/``.
+
+    Config requirements:
+        ``data.num_classes`` (int): seg class count.
+        ``data.ignore_index`` (int): seg ignore label.
+        ``data.names`` (list[str]): seg class names (optional, defaults to indices).
+    """
+
+    def __init__(self, cfg, model=None, test_loader=None, verbose=False, save_predictions=False):
+        super().__init__(cfg, model, test_loader, verbose)
+        self.save_predictions = save_predictions
+
+    def test(self):
+        logger = get_root_logger()
+        logger.info(">>>>>>>>>>>>>>>> Start Seg-Only Evaluation >>>>>>>>>>>>>>>>")
+
+        seg_num_classes = self.cfg.data.num_classes
+        seg_ignore_index = self.cfg.data.ignore_index
+        seg_names = getattr(
+            self.cfg.data, "names", [str(i) for i in range(seg_num_classes)]
+        )
+        intersection_meter = AverageMeter()
+        union_meter = AverageMeter()
+        target_meter = AverageMeter()
+
+        self.model.eval()
+
+        predictions_dir = None
+        if self.save_predictions:
+            predictions_dir = os.path.join(self.cfg.save_path, "predictions")
+            if comm.is_main_process():
+                make_dirs(predictions_dir)
+            comm.synchronize()
+
+        dataset = self.test_loader.dataset
+        local_scan_meta = {}
+        local_seg = {}
+        local_scan_counter = 0
+
+        for idx, batch in enumerate(self.test_loader):
+            for key in batch:
+                if isinstance(batch[key], torch.Tensor):
+                    batch[key] = batch[key].cuda(non_blocking=True)
+
+            with torch.no_grad():
+                outputs = self.model(batch)
+
+            seg_pred = outputs["seg_logits"].max(1)[1]
+            segment = batch["segment"].reshape(-1)
+            intersection, union, target = intersection_and_union_gpu(
+                seg_pred, segment, seg_num_classes, seg_ignore_index
+            )
+            if comm.get_world_size() > 1:
+                dist.all_reduce(intersection)
+                dist.all_reduce(union)
+                dist.all_reduce(target)
+            intersection_meter.update(intersection.cpu().numpy())
+            union_meter.update(union.cpu().numpy())
+            target_meter.update(target.cpu().numpy())
+
+            if self.save_predictions:
+                B = batch["scan_idx"].shape[0]
+                seg_pred_dense = (
+                    outputs["seg_logits"].argmax(dim=1).view(B, -1).cpu().numpy()
+                )
+                seg_gt_dense = (
+                    batch["segment"].view(B, -1).cpu().numpy()
+                    if "segment" in batch
+                    else None
+                )
+
+                for b in range(B):
+                    s_idx = batch["scan_idx"][b].item()
+                    ridx, sensor, ts = dataset.samples[s_idx % len(dataset.samples)]
+                    abs_root = dataset.roots[ridx]
+                    coord_path = os.path.join(
+                        str(abs_root), sensor, "pointcloud_raw", "coord", f"{ts}.npy"
+                    )
+
+                    local_scan_meta[local_scan_counter] = {
+                        "scan_idx": s_idx,
+                        "sensor": sensor,
+                        "timestamp": ts,
+                        "annotation_root": str(abs_root),
+                        "coord_path": coord_path,
+                        "point_cloud_dims_min": (
+                            batch["point_cloud_dims_min"][b].cpu().numpy().tolist()
+                            if "point_cloud_dims_min" in batch
+                            else None
+                        ),
+                        "point_cloud_dims_max": (
+                            batch["point_cloud_dims_max"][b].cpu().numpy().tolist()
+                            if "point_cloud_dims_max" in batch
+                            else None
+                        ),
+                        "frame_id": "agco_lidar_canonical",
+                    }
+                    if "frame_meta" in batch:
+                        fm = batch["frame_meta"]
+                        if isinstance(fm, list):
+                            local_scan_meta[local_scan_counter]["frame_meta"] = fm[b]
+                        elif isinstance(fm, dict):
+                            curr = {}
+                            for k, v in fm.items():
+                                if isinstance(v, torch.Tensor):
+                                    curr[k] = v[b].item() if v.ndim > 0 else v.item()
+                                elif isinstance(v, list):
+                                    curr[k] = v[b]
+                                else:
+                                    curr[k] = v
+                            local_scan_meta[local_scan_counter]["frame_meta"] = curr
+
+                    np.save(
+                        os.path.join(predictions_dir, f"{s_idx}_points.npy"),
+                        batch["point_clouds"][b].cpu().numpy(),
+                    )
+                    np.save(
+                        os.path.join(predictions_dir, f"{s_idx}_seg_pred.npy"),
+                        seg_pred_dense[b],
+                    )
+                    seg_entry = {
+                        "pred_file": f"{s_idx}_seg_pred.npy",
+                        "gt_file": None,
+                    }
+                    if seg_gt_dense is not None:
+                        np.save(
+                            os.path.join(predictions_dir, f"{s_idx}_seg_gt.npy"),
+                            seg_gt_dense[b],
+                        )
+                        seg_entry["gt_file"] = f"{s_idx}_seg_gt.npy"
+                    local_seg[local_scan_counter] = seg_entry
+                    local_scan_counter += 1
+
+            if (idx + 1) % 50 == 0 or (idx + 1) == len(self.test_loader):
+                logger.info(
+                    "Test: [{iter}/{max_iter}]".format(
+                        iter=idx + 1, max_iter=len(self.test_loader)
+                    )
+                )
+
+        comm.synchronize()
+        all_meta = comm.gather(local_scan_meta, dst=0) if self.save_predictions else None
+        all_seg = comm.gather(local_seg, dst=0) if self.save_predictions else None
+
+        intersection = intersection_meter.sum
+        union = union_meter.sum
+        target = target_meter.sum
+        iou_class = intersection / (union + 1e-10)
+        acc_class = intersection / (target + 1e-10)
+        m_iou = float(np.mean(iou_class))
+        m_acc = float(np.mean(acc_class))
+        all_acc = float(sum(intersection) / (sum(target) + 1e-10))
+
+        if comm.is_main_process():
+            logger.info(
+                "Test result: mIoU/mAcc/allAcc {:.4f}/{:.4f}/{:.4f}".format(
+                    m_iou, m_acc, all_acc
+                )
+            )
+            for cls_id, name in enumerate(seg_names[:seg_num_classes]):
+                logger.info(
+                    "  seg[{:>2}] {:20s}: IoU={:.4f}  Acc={:.4f}".format(
+                        cls_id, name, float(iou_class[cls_id]),
+                        float(acc_class[cls_id]),
+                    )
+                )
+
+            if self.cfg.enable_wandb:
+                import wandb
+                if wandb.run is not None:
+                    wandb_dict = {
+                        "test/mIoU": m_iou,
+                        "test/mAcc": m_acc,
+                        "test/allAcc": all_acc,
+                    }
+                    for cls_id, name in enumerate(seg_names[:seg_num_classes]):
+                        wandb_dict["test_finegrained/IoU_{}".format(name)] = float(iou_class[cls_id])
+                        wandb_dict["test_finegrained/OA_{}".format(name)] = float(acc_class[cls_id])
+                    wandb.log(wandb_dict)
+
+            if self.save_predictions:
+                merged_meta, merged_seg, scan_cnt = {}, {}, 0
+                for meta_dict, seg_dict in zip(all_meta, all_seg):
+                    for local_id in sorted(meta_dict.keys()):
+                        merged_meta[scan_cnt] = meta_dict[local_id]
+                        if local_id in seg_dict:
+                            merged_seg[scan_cnt] = seg_dict[local_id]
+                        scan_cnt += 1
+
+                dataset_cfg_diag = {
+                    "split": getattr(dataset, "split", None),
+                    "num_points": getattr(dataset, "num_points", None),
+                    "min_inliers": getattr(dataset, "min_inliers", None),
+                    "apply_t_rtk": getattr(dataset, "apply_t_rtk", None),
+                    "apply_r_global": getattr(dataset, "apply_r_global", None),
+                    "apply_r_level_to_points": getattr(dataset, "apply_r_level_to_points", None),
+                    "apply_r_level_to_boxes": getattr(dataset, "apply_r_level_to_boxes", None),
+                    "sensors": list(getattr(dataset, "sensors", [])) if hasattr(dataset, "sensors") else None,
+                }
+                manifest = []
+                for sc in sorted(merged_meta.keys()):
+                    meta = merged_meta[sc]
+                    s_idx = meta["scan_idx"]
+                    seg_entry = merged_seg.get(sc, {})
+                    seg_pred_file = seg_entry.get("pred_file")
+                    seg_gt_file = seg_entry.get("gt_file")
+
+                    scan_seg_summary = None
+                    if seg_pred_file is not None:
+                        sp = np.load(os.path.join(predictions_dir, seg_pred_file))
+                        sg = (
+                            np.load(os.path.join(predictions_dir, seg_gt_file))
+                            if seg_gt_file is not None
+                            else None
+                        )
+                        if sg is not None:
+                            valid = sg != seg_ignore_index
+                            per_class_iou = {}
+                            for c in range(seg_num_classes):
+                                pred_c = (sp == c) & valid
+                                gt_c = (sg == c) & valid
+                                inter = int(np.logical_and(pred_c, gt_c).sum())
+                                union_c = int(np.logical_or(pred_c, gt_c).sum())
+                                per_class_iou[seg_names[c]] = (
+                                    float(inter) / float(union_c) if union_c > 0 else None
+                                )
+                            scan_seg_summary = {
+                                "per_class_iou": per_class_iou,
+                                "num_points_valid": int(valid.sum()),
+                                "num_points_total": int(sg.size),
+                            }
+
+                    record = {
+                        **meta,
+                        "seg_class_names": seg_names[:seg_num_classes],
+                        "dataset_config_diagnostics": dataset_cfg_diag,
+                        "seg_pred_file": seg_pred_file,
+                        "seg_gt_file": seg_gt_file,
+                        "seg_per_scan": scan_seg_summary,
+                    }
+                    json_path = os.path.join(predictions_dir, f"{s_idx}.json")
+                    with open(json_path, "w") as f:
+                        json.dump(record, f)
+
+                    manifest.append({
+                        "scan_idx": s_idx,
+                        "json_file": f"{s_idx}.json",
+                        "points_file": f"{s_idx}_points.npy",
+                        "seg_pred_file": seg_pred_file,
+                        "seg_gt_file": seg_gt_file,
+                    })
+
+                with open(os.path.join(predictions_dir, "manifest.json"), "w") as f:
+                    json.dump(manifest, f, indent=2)
+
+                summary = {
+                    "mIoU": float(m_iou),
+                    "mAcc": float(m_acc),
+                    "allAcc": float(all_acc),
+                    "iou_per_class": {
+                        seg_names[c]: float(iou_class[c]) for c in range(seg_num_classes)
+                    },
+                    "acc_per_class": {
+                        seg_names[c]: float(acc_class[c]) for c in range(seg_num_classes)
+                    },
+                }
+                with open(os.path.join(predictions_dir, "metrics.json"), "w") as f:
+                    json.dump(summary, f, indent=2)
+
+                logger.info(f"Predictions saved to {predictions_dir} ({len(manifest)} scans)")
+
+            logger.info(
+                "<<<<<<<<<<<<<<<<< End Seg-Only Evaluation <<<<<<<<<<<<<<<<<"
+            )
+
+        comm.synchronize()
+
+    @staticmethod
+    def collate_fn(batch):
+        from torch.utils.data.dataloader import default_collate
+        return default_collate(batch)
