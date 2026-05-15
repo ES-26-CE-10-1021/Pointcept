@@ -1,28 +1,38 @@
 """
-3DETR on ScanNet — Utonia encoder with last stage fine-tuned + FPS, v5m1-1.
+3DETR on ScanNet — Utonia (PT-v3m3) frozen pre-encoder + Identity encoder,
+v4m2 ("Frozen Utonia + minimal head").
 
-v5m1-1 = v5m1-0 with FPS(2048) after the backbone, producing fixed-length
-tokens (no padding mask). Everything else (enc_finetune freeze, data
-stance, optimizer, hooks) is identical to v5m1-0.
+Foundation-model evaluation variant. The Utonia backbone is fully frozen
+(``freeze_backbone="enc"``) and the 3DETR transformer encoder is replaced
+by an identity pass-through, so the only trainable parameters are the
+3DETR transformer decoder and the per-query prediction heads — the
+minimum architecture admitting DETR-style set prediction on top of frozen
+features. Token budget is kept at FPS-2048 to match v4m1 for clean
+comparison.
 
-Token-budget counterpart to v5m1-0 — lets you isolate whether FPS
-downsampling helps or hurts when the encoder's last stage is being
-fine-tuned.
+This is **not** strict linear probing (the decoder is an 8-layer
+transformer) but it serves the same role: it measures how transferable
+Utonia's pretrained features are to the ScanNet detection task under the
+tightest trainable budget that still permits a valid 3DETR head.
+
+Differs from ``det-3detr-utonia-v4m1-0-scannet.py`` only by:
+  - ``encoder = IdentityEncoder3DETR``  (was ``VanillaTransformerEncoder3DETR``)
 
 Usage:
-    sh scripts/train.sh -d scannet -c det-3detr-utonia-v5m1-1-scannet -n my_exp -g 4
+    sh scripts/train.sh -d scannet -c det-3detr-utonia-v4m2-0-scannet -n my_exp -g 4
 """
 
 _base_ = ["../_base_/default_runtime.py"]
 
 # ── Training ─────────────────────────────────────────────────────────────────
-batch_size = 8
+batch_size = 8       # total across all GPUs
 num_worker = 16
-mix_prob = 0
+mix_prob = 0         # detection dataset does not support MixUp
 enable_amp = False
-find_unused_parameters = True
+find_unused_parameters = False
 clip_grad = 0.1
 
+# Utonia's deepest-stage output width (PT-v3m3 enc_channels[-1]).
 UTONIA_ENC_DIM = 576
 
 # ── Model ─────────────────────────────────────────────────────────────────────
@@ -34,16 +44,10 @@ model = dict(
         grid_size=0.01,
         enc_mode=True,
         npoint=2048,
-        freeze_backbone="enc_finetune",
+        freeze_backbone="enc",
     ),
     encoder=dict(
-        type="VanillaTransformerEncoder3DETR",
-        encoder_dim=UTONIA_ENC_DIM,
-        nhead=4,
-        nlayers=3,
-        ffn_dim=128,
-        dropout=0.1,
-        activation="relu",
+        type="IdentityEncoder3DETR",
     ),
     decoder=dict(
         type="TransformerDecoder3DETR",

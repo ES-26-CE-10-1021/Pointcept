@@ -125,6 +125,29 @@ num_points = 100_000
 class_names = list(included_classes)
 min_inliers = 500
 
+det_crop_transforms = [
+    dict(
+        type="FovCropDetection",
+        azimuth_deg=(-60, 60),
+        elevation_deg=None,
+        crop_points=True,
+        per_sensor={
+            "lslidar": dict(azimuth_deg=(-60, 60)),
+            "ouster": dict(azimuth_deg=(-60, 60)),
+            "rslidar": dict(azimuth_deg=(-60, 60)),
+        },
+    ),
+    dict(
+        type="SphericalCropDetection",
+        max_dist=60.0,
+        min_dist=1.0,
+        per_sensor={
+            "lslidar": dict(max_dist=60.0),
+            "ouster": dict(max_dist=40.0),
+            "rslidar": dict(max_dist=20.0),
+        },
+    ),
+]
 
 data = dict(
     train=dict(
@@ -154,6 +177,7 @@ data = dict(
         # residual_rpy_warn_deg=5,
         
         transform=[
+            *det_crop_transforms,
             dict(type="RandomFlipDetection", p_x=0.0, p_y=0.5),
             dict(type="RandomRotateZDetection", angle_deg=(-5.0, 5.0)),
             # dict(type="RandomScaleDetection", scale=(0.9, 1.1), apply_to_sizes=True),
@@ -188,6 +212,7 @@ data = dict(
         require_gravity_align=False,
 
         transform=[
+            *det_crop_transforms,
             dict(type="PointSubsampleDetection", num_points=num_points),
         ],
     ),
@@ -216,6 +241,7 @@ data = dict(
         require_gravity_align=False,
         
         transform=[
+            *det_crop_transforms,
             dict(type="PointSubsampleDetection", num_points=num_points),
         ],
     ),

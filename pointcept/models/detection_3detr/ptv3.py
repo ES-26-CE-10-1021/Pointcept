@@ -26,7 +26,7 @@ use and never updated during training.
 import logging
 
 import torch
-from pointcept.models.builder import MODULES
+from pointcept.models.builder import MODELS, MODULES
 from pointcept.models.point_transformer_v3.point_transformer_v3m1_base import (
     PointTransformerV3,
 )
@@ -201,6 +201,7 @@ def _ddp_safe_utonia_load(pretrained, download_root):
 _FREEZE_MODES = ("enc", "enc_finetune", "none")
 
 
+@MODELS.register_module("PTv3m3PreEncoder")
 @MODULES.register_module("PTv3m3PreEncoder")
 class PTv3m3PreEncoder(PointTransformerV3m3):
     """PT-v3m3 (Utonia) wrapped as a pretrained 3DETR pre_encoder.
@@ -482,6 +483,111 @@ class PTv3m3PreEncoder(PointTransformerV3m3):
         if self.training:
             point.feat.requires_grad_(True)
 
+    @staticmethod
+    def _clear_subm_pair_cache(point):
+        """Walk the pooling-parent chain and drop cached SubMConv indice pairs.
+
+        Each ``SparseConvTensor`` caches indice-pair tables in
+        ``indice_dict[indice_key]`` for SubMConv reuse. When the encoder's
+        first SubMConv at a stage ran under ``torch.no_grad()`` (or with
+        all-frozen inputs/weights so autograd's Function wasn't engaged),
+        the cached pair carries no backward indices. The decoder later
+        reuses the same key (``stage{s}``) at the same resolution; backward
+        then hits ``!indices.empty()`` in ``implicit_gemm_backward``.
+
+        Clearing the cache before the dec runs forces fresh pair generation
+        through spconv's autograd.Function (since the dec has trainable
+        params), which populates both forward and backward indices.
+        """
+        cur = point
+        while cur is not None:
+            sct = getattr(cur, "sparse_conv_feat", None)
+            if sct is not None and getattr(sct, "indice_dict", None):
+                sct.indice_dict.clear()
+            cur = cur.get("pooling_parent") if "pooling_parent" in cur.keys() else None
+
+    def forward_enc_dec_split(self, xyz, features=None):
+        """Multi-task entry point: split encoder bottleneck from decoder output.
+
+        Mirrors :meth:`forward` up to the ``self.dec`` call but, instead of
+        running the full encoder→decoder→FPS pipeline in one shot, snapshots
+        the encoder bottleneck (xyz / features / padding mask) **before**
+        ``self.dec`` mutates the bottleneck Point's pooling-parent chain.
+
+        Required by ``MultiTask3DETRSegmentor`` so the detection branch can
+        consume the bottleneck (after an external FPS) while the seg branch
+        consumes the decoder output (unpooled back to root resolution).
+
+        Args:
+            xyz:      (B, N, 3) point coordinates.
+            features: (B, C, N) point features, or ``None``.
+
+        Returns:
+            Tuple ``(enc_xyz, enc_features, padding_mask, dec_point)``:
+              - ``enc_xyz``:      (B, N', 3) bottleneck coordinates (padded).
+              - ``enc_features``: (N', B, C_enc) transformer convention.
+              - ``padding_mask``: (B, N') bool, or ``None``.
+              - ``dec_point``:    Point at first-encoder-stage resolution
+                                  with the unpool parent chain still attached.
+        """
+        assert self.npoint is None, (
+            "forward_enc_dec_split requires npoint=None — the multi-task "
+            "model applies its own FPS to the bottleneck."
+        )
+        assert not self.enc_mode, (
+            "forward_enc_dec_split requires enc_mode=False — the seg branch "
+            "consumes the decoder output."
+        )
+
+        feat_padded = self._build_padded_feat(xyz, features)
+        point = dense2point(xyz, feat_padded)
+        point["grid_size"] = self.grid_size
+
+        if self.freeze_backbone == "enc_finetune":
+            with torch.no_grad():
+                point.serialization(
+                    order=self.order, shuffle_orders=self.shuffle_orders
+                )
+                point.sparsify()
+                point = self.embedding(point)
+                for _, stage in list(self.enc.named_children())[:-1]:
+                    point = stage(point)
+            self._bridge_leaf(point)
+            point = self.enc[-1](point)
+        elif self.freeze_backbone == "enc":
+            with torch.no_grad():
+                point.serialization(
+                    order=self.order, shuffle_orders=self.shuffle_orders
+                )
+                point.sparsify()
+                point = self.embedding(point)
+                point = self.enc(point)
+            # Decoder follows (enc_mode=False) so bridge here to start a
+            # fresh graph for the trainable dec.
+            self._bridge_leaf(point)
+        else:  # "none"
+            point.serialization(
+                order=self.order, shuffle_orders=self.shuffle_orders
+            )
+            point.sparsify()
+            point = self.embedding(point)
+            point = self.enc(point)
+
+        # Snapshot the bottleneck NOW. self.dec() will mutate point by
+        # popping its pooling_parent / pooling_inverse fields.
+        enc_xyz, enc_features_dense, padding_mask = point2dense(point)
+        enc_features = enc_features_dense.permute(2, 0, 1).contiguous()  # (N', B, C)
+
+        # Drop the encoder's cached SubMConv indice pairs from every
+        # pooling-parent SparseConvTensor so the dec regenerates pairs
+        # through spconv's autograd path (which populates the backward
+        # indices implicit_gemm_backward needs). See _clear_subm_pair_cache.
+        if self.freeze_backbone in ("enc", "enc_finetune"):
+            self._clear_subm_pair_cache(point)
+
+        dec_point = self.dec(point)
+        return enc_xyz, enc_features, padding_mask, dec_point
+
     def forward(self, xyz, features=None):
         """
         Args:
@@ -537,8 +643,13 @@ class PTv3m3PreEncoder(PointTransformerV3m3):
             point = self.enc(point)
 
         # Decoder (when present) is always trainable — fresh weights on
-        # top of whatever the encoder produced.
+        # top of whatever the encoder produced. Drop the encoder's cached
+        # SubMConv indice pairs first so the dec regenerates pairs through
+        # spconv's autograd path (populates the backward indices that
+        # implicit_gemm_backward needs). See _clear_subm_pair_cache.
         if not self.enc_mode:
+            if self.freeze_backbone in ("enc", "enc_finetune"):
+                self._clear_subm_pair_cache(point)
             point = self.dec(point)
 
         # Encoder-only + "enc": nothing has built a graph on point.feat

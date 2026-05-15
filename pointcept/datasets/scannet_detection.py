@@ -107,8 +107,24 @@ class ScanNetDetectionDataset(Dataset):
         num_points (int): number of points to sample per scene
         use_color (bool): append RGB colour (normalised) to point features
         use_height (bool): append height above floor as an extra feature
-        augment (bool): apply random flips, rotations, and cuboid crop
-        random_cuboid_min_points (int): minimum points retained by cuboid crop
+        transform (list[dict] | None): config-driven detection-aware
+            augmentation pipeline (registered transforms in
+            ``pointcept/datasets/det_transform.py``). Replaces the legacy
+            ``augment`` / ``random_cuboid_min_points`` kwargs. Pipeline
+            operates on the raw ``(point_cloud, gt_box_*_raw, ...)`` dict
+            in step. The dataset still enforces ``num_points`` as a final
+            safety net.
+        utonia_preprocess (bool): if True, apply scale-0.5 + XY-mean /
+            Z-min center-shift to points and box centers / sizes inline
+            **before** the transform pipeline. Matches the canonical
+            preprocessing the Utonia (PT-v3m3) checkpoint was pretrained
+            with.
+        load_segment (bool): if True, expose per-point semantic labels
+            under the ``"segment"`` key in the returned dict. Mapped via
+            the same NYU-40 → semseg-class table the dataset already uses
+            for its internal ``sem_seg_labels`` derivation. Plumbed
+            through the transform pipeline in lockstep with
+            ``point_cloud`` for the multi-task semseg branch.
     """
 
     def __init__(
@@ -119,20 +135,21 @@ class ScanNetDetectionDataset(Dataset):
         num_points=40000,
         use_color=False,
         use_height=False,
-        augment=False,
-        random_cuboid_min_points=30000,
+        transform=None,
         loop=1,
         utonia_preprocess=False,
+        load_segment=False,
     ):
         assert split in ("train", "val"), f"Unknown split: {split}"
         self.root_dir = root_dir
         self.num_points = num_points
         self.use_color = use_color
         self.use_height = use_height
-        self.augment = augment
-        self.random_cuboid_min_points = random_cuboid_min_points
+        from .transform import Compose
+        self.transform = Compose(transform or [])
         self.loop = loop
         self.utonia_preprocess = utonia_preprocess
+        self.load_segment = bool(load_segment)
 
         self.nyu40id2class = {
             nyu40id: i for i, nyu40id in enumerate(list(DETECTION_NYU40_IDS))
@@ -196,95 +213,110 @@ class ScanNetDetectionDataset(Dataset):
         scan_name = self.scan_names[idx % len(self.scan_names)]
 
         mesh_vertices = np.load(os.path.join(self.root_dir, scan_name) + "_vert.npy")
-        instance_labels = np.load(
-            os.path.join(self.root_dir, scan_name) + "_ins_label.npy"
-        )
-        semantic_labels = np.load(
-            os.path.join(self.root_dir, scan_name) + "_sem_label.npy"
-        )
         instance_bboxes = np.load(
             os.path.join(self.root_dir, scan_name) + "_bbox.npy"
         )
 
+        # --- Build per-point arrays ---
         if not self.use_color:
-            point_cloud = mesh_vertices[:, 0:3]
-            pcl_color = mesh_vertices[:, 3:6]
+            point_cloud = mesh_vertices[:, 0:3].astype(np.float32)
+            pcl_color = mesh_vertices[:, 3:6].astype(np.float32)
         else:
-            point_cloud = mesh_vertices[:, 0:6]
+            point_cloud = mesh_vertices[:, 0:6].astype(np.float32)
             if self.utonia_preprocess:
                 point_cloud[:, 3:] = point_cloud[:, 3:] / 255.0
             else:
                 point_cloud[:, 3:] = (point_cloud[:, 3:] - MEAN_COLOR_RGB) / 256.0
-            pcl_color = point_cloud[:, 3:]
+            pcl_color = point_cloud[:, 3:6].copy()
 
         if self.use_height:
             floor_height = np.percentile(point_cloud[:, 2], 0.99)
             height = point_cloud[:, 2] - floor_height
             point_cloud = np.concatenate(
-                [point_cloud, np.expand_dims(height, 1)], axis=1
+                [point_cloud, np.expand_dims(height, 1).astype(point_cloud.dtype)],
+                axis=1,
             )
 
+        # --- Build raw box arrays (axis-aligned: yaw=0). ---
+        n_boxes = int(instance_bboxes.shape[0])
+        centers_raw = instance_bboxes[:, 0:3].astype(np.float32)
+        sizes_raw = instance_bboxes[:, 3:6].astype(np.float32)
+        angles_raw = np.zeros((n_boxes,), dtype=np.float32)
+        if n_boxes > 0:
+            labels_raw = np.array(
+                [self.nyu40id2class[int(x)] for x in instance_bboxes[:, -1]],
+                dtype=np.int64,
+            )
+        else:
+            labels_raw = np.zeros((0,), dtype=np.int64)
+
+        # --- Optionally load per-point semantic labels (multi-task semseg). ---
+        segment = None
+        if self.load_segment:
+            semantic_labels = np.load(
+                os.path.join(self.root_dir, scan_name) + "_sem_label.npy"
+            )
+            segment = np.full_like(semantic_labels, IGNORE_LABEL, dtype=np.int64)
+            for c in DETECTION_NYU40_IDS_SEMSEG:
+                segment[semantic_labels == c] = self.nyu40id2class_semseg[c]
+
+        # --- Utonia-canonical preprocessing (deterministic; pre-augment). ---
+        # RandomScale(0.5) + CenterShift(XY mean, Z min). Applied to points
+        # and to raw box centers/sizes so the transform pipeline operates
+        # on the canonicalised frame.
+        if self.utonia_preprocess:
+            point_cloud[:, 0:3] *= 0.5
+            centers_raw *= 0.5
+            sizes_raw *= 0.5
+            x_min, y_min, z_min = point_cloud[:, 0:3].min(axis=0)
+            x_max, y_max, _ = point_cloud[:, 0:3].max(axis=0)
+            shift = np.array(
+                [(x_min + x_max) / 2, (y_min + y_max) / 2, z_min], dtype=np.float32
+            )
+            point_cloud[:, 0:3] -= shift
+            if n_boxes > 0:
+                centers_raw -= shift
+
+        # --- Augmentation pipeline (config-driven). ---
+        data_dict = {
+            "point_cloud": point_cloud,
+            "pcl_color": pcl_color,
+            "gt_box_centers_raw": centers_raw,
+            "gt_box_sizes_raw": sizes_raw,
+            "gt_box_angles_raw": angles_raw,
+            "gt_box_labels_raw": labels_raw,
+        }
+        if segment is not None:
+            data_dict["segment"] = segment
+        data_dict = self.transform(data_dict)
+        point_cloud = data_dict["point_cloud"]
+        pcl_color = data_dict["pcl_color"]
+        segment = data_dict.get("segment")  # None when load_segment=False
+        centers_raw = data_dict["gt_box_centers_raw"]
+        sizes_raw = data_dict["gt_box_sizes_raw"]
+        angles_raw = data_dict["gt_box_angles_raw"]
+        labels_raw = data_dict["gt_box_labels_raw"]
+
+        # --- Safety-net subsample (idempotent if pipeline already did it). ---
+        if point_cloud.shape[0] != self.num_points:
+            point_cloud, choices = _random_sampling(point_cloud, self.num_points)
+            pcl_color = pcl_color[choices]
+            if segment is not None:
+                segment = segment[choices]
+        point_cloud = point_cloud.astype(np.float32)
+
+        # --- Pack GT bounding boxes to MAX_NUM_OBJ. ---
         MAX_NUM_OBJ = self.max_num_obj
         target_bboxes = np.zeros((MAX_NUM_OBJ, 6), dtype=np.float32)
         target_bboxes_mask = np.zeros((MAX_NUM_OBJ,), dtype=np.float32)
         angle_classes = np.zeros((MAX_NUM_OBJ,), dtype=np.int64)
         angle_residuals = np.zeros((MAX_NUM_OBJ,), dtype=np.float32)
-        raw_sizes = np.zeros((MAX_NUM_OBJ, 3), dtype=np.float32)
         raw_angles = np.zeros((MAX_NUM_OBJ,), dtype=np.float32)
-
-        # Random cuboid crop augmentation
-        if self.augment:
-            point_cloud, instance_bboxes, per_point_labels = _random_cuboid_augment(
-                point_cloud,
-                instance_bboxes,
-                [instance_labels, semantic_labels],
-                min_points=self.random_cuboid_min_points,
-            )
-            instance_labels = per_point_labels[0]
-            semantic_labels = per_point_labels[1]
-
-        # Sub-sample to fixed number of points
-        point_cloud, choices = _random_sampling(point_cloud, self.num_points)
-        instance_labels = instance_labels[choices]
-        semantic_labels = semantic_labels[choices]
-        pcl_color = pcl_color[choices]
-
-        # Per-point semantic segmentation labels (for auxiliary seg loss if needed)
-        sem_seg_labels = np.full_like(semantic_labels, IGNORE_LABEL, dtype=np.int64)
-        for c in DETECTION_NYU40_IDS_SEMSEG:
-            sem_seg_labels[semantic_labels == c] = self.nyu40id2class_semseg[c]
-
-        # Pack GT bounding boxes
-        num_gt = min(instance_bboxes.shape[0], MAX_NUM_OBJ)
-        target_bboxes_mask[:num_gt] = 1
-        target_bboxes[:num_gt, :] = instance_bboxes[:num_gt, 0:6]
-
-        # Utonia-canonical preprocessing (scale=0.5, CenterShift z+)
-        # Must run before flip/rotation augmentation and box normalization.
-        if self.utonia_preprocess:
-            # RandomScale(0.5): halve XYZ coords, box centers, and box sizes
-            point_cloud[:, 0:3] *= 0.5
-            target_bboxes[:, 0:3] *= 0.5   # centers
-            target_bboxes[:, 3:6] *= 0.5   # sizes
-            # CenterShift(apply_z=True): shift XY to mean, Z to min
-            x_min, y_min, z_min = point_cloud[:, 0:3].min(axis=0)
-            x_max, y_max, _ = point_cloud[:, 0:3].max(axis=0)
-            shift = np.array([(x_min + x_max) / 2, (y_min + y_max) / 2, z_min])
-            point_cloud[:, 0:3] -= shift
-            target_bboxes[:, 0:3] -= shift   # centers only; sizes unaffected
-
-        # --- Data augmentation ---
-        if self.augment:
-            if np.random.random() > 0.5:
-                point_cloud[:, 0] = -1 * point_cloud[:, 0]
-                target_bboxes[:, 0] = -1 * target_bboxes[:, 0]
-            if np.random.random() > 0.5:
-                point_cloud[:, 1] = -1 * point_cloud[:, 1]
-                target_bboxes[:, 1] = -1 * target_bboxes[:, 1]
-            rot_angle = (np.random.random() * np.pi / 18) - np.pi / 36
-            rot_mat = _rotz(rot_angle)
-            point_cloud[:, 0:3] = np.dot(point_cloud[:, 0:3], np.transpose(rot_mat))
-            target_bboxes = _rotate_aligned_boxes(target_bboxes, rot_mat)
+        num_gt = min(int(centers_raw.shape[0]), MAX_NUM_OBJ)
+        target_bboxes_mask[:num_gt] = 1.0
+        target_bboxes[:num_gt, 0:3] = centers_raw[:num_gt]
+        target_bboxes[:num_gt, 3:6] = sizes_raw[:num_gt]
+        raw_angles[:num_gt] = angles_raw[:num_gt]
 
         raw_sizes = target_bboxes[:, 3:6]
         point_cloud_dims_min = point_cloud.min(axis=0)[:3]
@@ -329,15 +361,12 @@ class ScanNetDetectionDataset(Dataset):
         except Exception:
             box_corners = np.zeros((MAX_NUM_OBJ, 8, 3), dtype=np.float32)
 
-        # Semantic class labels for GT boxes
+        # Semantic class labels for GT boxes (already mapped to detection-class space).
         target_bboxes_semcls = np.zeros((MAX_NUM_OBJ,), dtype=np.int64)
         if num_gt > 0:
-            target_bboxes_semcls[:num_gt] = [
-                self.nyu40id2class[int(x)]
-                for x in instance_bboxes[:num_gt, -1]
-            ]
+            target_bboxes_semcls[:num_gt] = labels_raw[:num_gt]
 
-        return {
+        out = {
             "point_clouds": point_cloud.astype(np.float32),
             "gt_box_corners": box_corners.astype(np.float32),
             "gt_box_centers": box_centers.astype(np.float32),
@@ -354,3 +383,6 @@ class ScanNetDetectionDataset(Dataset):
             "point_cloud_dims_min": point_cloud_dims_min.astype(np.float32),
             "point_cloud_dims_max": point_cloud_dims_max.astype(np.float32),
         }
+        if segment is not None:
+            out["segment"] = segment.astype(np.int64)
+        return out

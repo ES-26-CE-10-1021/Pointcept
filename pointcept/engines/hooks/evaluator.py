@@ -1055,3 +1055,290 @@ class ObjDetEvaluator(HookBase):
             "Best AP50: {:.2f}".format(self.trainer.best_metric_value)
         )
 
+
+@HOOKS.register_module()
+class CombinedSegDetEvaluator(HookBase):
+    """Multi-task evaluator: per-batch IoU accumulation + 3DETR AP25/AP50.
+
+    Pairs with ``MultiTask3DETRSegmentor``: the model returns
+    ``dict(seg_logits, outputs, aux_outputs)`` in eval mode, so this hook
+    drives both ``intersection_and_union_gpu`` (mirroring
+    ``SemSegEvaluator.eval``) and ``APCalculator.step_meter`` (mirroring
+    ``ObjDetEvaluator.eval``) in one pass over the val loader.
+
+    The primary metric reported to ``CheckpointSaver`` is AP50, matching the
+    detection-only setup. mIoU is logged but not used as the best-checkpoint
+    selector.
+
+    Config requirements (same as ObjDetEvaluator + SemSegEvaluator):
+        - ``num_semcls`` (int): detection class count (e.g. 18 for ScanNet).
+        - ``class_names`` (list[str]): detection class names.
+        - ``data.num_classes`` (int): semseg class count.
+        - ``data.ignore_index`` (int): semseg ignore label.
+        - ``data.names`` (list[str]): semseg class names (optional but useful).
+    """
+
+    def after_epoch(self):
+        if self.trainer.cfg.evaluate:
+            self.eval()
+
+    def eval(self):
+        from pointcept.models.detection_3detr.dataset_config import (
+            _setup_3detr_path,
+        )
+        _setup_3detr_path()
+        from utils.ap_calculator import APCalculator, get_ap_config_dict
+
+        self.trainer.logger.info(
+            ">>>>>>>>>>>>>>>> Start Multi-Task Evaluation >>>>>>>>>>>>>>>>"
+        )
+        self.trainer.model.eval()
+
+        # ── Detection AP setup (mirrors ObjDetEvaluator). ────────────────
+        num_semcls = getattr(self.trainer.cfg, "num_semcls", 18)
+        class_names = getattr(
+            self.trainer.cfg, "class_names", [str(i) for i in range(num_semcls)]
+        )
+        class2type_map = {i: name for i, name in enumerate(class_names)}
+
+        class _SemClsProxy:
+            def __init__(self, n):
+                self.num_semcls = n
+
+        ap_config_dict = get_ap_config_dict(
+            remove_empty_box=True,
+            use_3d_nms=True,
+            nms_iou=0.25,
+            cls_nms=True,
+            per_class_proposal=True,
+            conf_thresh=0.05,
+            dataset_config=_SemClsProxy(num_semcls),
+        )
+        ap_calculator = APCalculator(
+            dataset_config=_SemClsProxy(num_semcls),
+            ap_iou_thresh=[0.25, 0.5],
+            class2type_map=class2type_map,
+            ap_config_dict=ap_config_dict,
+        )
+
+        # ── Seg IoU accumulators (mirrors SemSegEvaluator). ──────────────
+        seg_num_classes = self.trainer.cfg.data.num_classes
+        seg_ignore_index = self.trainer.cfg.data.ignore_index
+        seg_names = getattr(
+            self.trainer.cfg.data, "names", [str(i) for i in range(seg_num_classes)]
+        )
+
+        total_loss = 0.0
+        num_batches = 0
+        for i, input_dict in enumerate(self.trainer.val_loader):
+            for key in input_dict.keys():
+                if isinstance(input_dict[key], torch.Tensor):
+                    input_dict[key] = input_dict[key].cuda(non_blocking=True)
+
+            with torch.no_grad():
+                # Loss requires train mode (criterion runs only when training).
+                self.trainer.model.train()
+                loss_out = self.trainer.model(input_dict)
+                self.trainer.model.eval()
+                output_dict = self.trainer.model(input_dict)
+
+            if "loss" in loss_out:
+                total_loss += loss_out["loss"].item()
+                num_batches += 1
+
+            # Detection step.
+            ap_calculator.step_meter(output_dict, input_dict)
+
+            # Seg step: accumulate per-batch intersection / union / target.
+            seg_logits = output_dict["seg_logits"]
+            seg_pred = seg_logits.max(1)[1]
+            segment = input_dict["segment"].reshape(-1)
+            intersection, union, target = intersection_and_union_gpu(
+                seg_pred, segment, seg_num_classes, seg_ignore_index
+            )
+            if comm.get_world_size() > 1:
+                dist.all_reduce(intersection)
+                dist.all_reduce(union)
+                dist.all_reduce(target)
+            self.trainer.storage.put_scalar(
+                "val_intersection", intersection.cpu().numpy()
+            )
+            self.trainer.storage.put_scalar("val_union", union.cpu().numpy())
+            self.trainer.storage.put_scalar("val_target", target.cpu().numpy())
+
+            if (i + 1) % 50 == 0 or (i + 1) == len(self.trainer.val_loader):
+                self.trainer.logger.info(
+                    "Test: [{iter}/{max_iter}]".format(
+                        iter=i + 1, max_iter=len(self.trainer.val_loader)
+                    )
+                )
+
+        loss_avg = total_loss / max(num_batches, 1)
+
+        # ── Aggregate detection AP across ranks. ─────────────────────────
+        comm.synchronize()
+        all_pred = comm.gather(ap_calculator.pred_map_cls, dst=0)
+        all_gt = comm.gather(ap_calculator.gt_map_cls, dst=0)
+
+        # ── Aggregate seg IoU. ──────────────────────────────────────────
+        intersection = self.trainer.storage.history("val_intersection").total
+        union = self.trainer.storage.history("val_union").total
+        target = self.trainer.storage.history("val_target").total
+        iou_class = intersection / (union + 1e-10)
+        acc_class = intersection / (target + 1e-10)
+        m_iou = float(np.mean(iou_class))
+        m_acc = float(np.mean(acc_class))
+        all_acc = float(sum(intersection) / (sum(target) + 1e-10))
+
+        if comm.is_main_process():
+            merged_pred, merged_gt, scan_cnt = {}, {}, 0
+            for pred_dict, gt_dict in zip(all_pred, all_gt):
+                for local_id in sorted(pred_dict.keys()):
+                    merged_pred[scan_cnt] = pred_dict[local_id]
+                    merged_gt[scan_cnt] = gt_dict[local_id]
+                    scan_cnt += 1
+            ap_calculator.pred_map_cls = merged_pred
+            ap_calculator.gt_map_cls = merged_gt
+
+            metrics = ap_calculator.compute_metrics()
+            ap25 = metrics[0.25]["mAP"] * 100
+            ap50 = metrics[0.5]["mAP"] * 100
+            ar25 = metrics[0.25].get("AR", float("nan")) * 100
+            ar50 = metrics[0.5].get("AR", float("nan")) * 100
+
+            self.trainer.logger.info(
+                "Val result: loss/AP25/AP50 {:.4f}/{:.2f}/{:.2f}".format(
+                    loss_avg, ap25, ap50
+                )
+            )
+            self.trainer.logger.info(
+                "Val result: AR25/AR50 {:.2f}/{:.2f}".format(ar25, ar50)
+            )
+            self.trainer.logger.info(
+                "Val result: mIoU/mAcc/allAcc {:.4f}/{:.4f}/{:.4f}".format(
+                    m_iou, m_acc, all_acc
+                )
+            )
+            for cls_id, name in enumerate(seg_names[:seg_num_classes]):
+                self.trainer.logger.info(
+                    "  seg[{:>2}] {:20s}: IoU={:.4f}  Acc={:.4f}".format(
+                        cls_id, name, float(iou_class[cls_id]),
+                        float(acc_class[cls_id]),
+                    )
+                )
+            for cls_name in class_names:
+                ap_key = "{} Average Precision".format(cls_name)
+                rec_key = "{} Recall".format(cls_name)
+                ap25_cls = metrics[0.25].get(ap_key, float("nan")) * 100
+                ap50_cls = metrics[0.5].get(ap_key, float("nan")) * 100
+                rec25_cls = metrics[0.25].get(rec_key, float("nan")) * 100
+                rec50_cls = metrics[0.5].get(rec_key, float("nan")) * 100
+                self.trainer.logger.info(
+                    "  det {:20s}: AP25={:.2f}  AP50={:.2f}  Rec25={:.2f}  Rec50={:.2f}".format(
+                        cls_name, ap25_cls, ap50_cls, rec25_cls, rec50_cls
+                    )
+                )
+
+            current_epoch = self.trainer.epoch + 1
+            if self.trainer.writer is not None:
+                self.trainer.writer.add_scalar("val/loss", loss_avg, current_epoch)
+                self.trainer.writer.add_scalar("val/AP25", ap25, current_epoch)
+                self.trainer.writer.add_scalar("val/AP50", ap50, current_epoch)
+                self.trainer.writer.add_scalar("val/AR25", ar25, current_epoch)
+                self.trainer.writer.add_scalar("val/AR50", ar50, current_epoch)
+                self.trainer.writer.add_scalar("val/mIoU", m_iou, current_epoch)
+                self.trainer.writer.add_scalar("val/mAcc", m_acc, current_epoch)
+                self.trainer.writer.add_scalar("val/allAcc", all_acc, current_epoch)
+                for cls_id, name in enumerate(seg_names[:seg_num_classes]):
+                    self.trainer.writer.add_scalar(
+                        "val_finegrained/IoU_{}".format(name), float(iou_class[cls_id]), current_epoch
+                    )
+                    self.trainer.writer.add_scalar(
+                        "val_finegrained/OA_{}".format(name), float(acc_class[cls_id]), current_epoch
+                    )
+                for cls_name in class_names:
+                    ap_key = "{} Average Precision".format(cls_name)
+                    rec_key = "{} Recall".format(cls_name)
+                    self.trainer.writer.add_scalar(
+                        "val_finegrained/AP25_{}".format(cls_name), metrics[0.25].get(ap_key, float("nan")) * 100, current_epoch
+                    )
+                    self.trainer.writer.add_scalar(
+                        "val_finegrained/AP50_{}".format(cls_name), metrics[0.5].get(ap_key, float("nan")) * 100, current_epoch
+                    )
+                    self.trainer.writer.add_scalar(
+                        "val_finegrained/Rec25_{}".format(cls_name), metrics[0.25].get(rec_key, float("nan")) * 100, current_epoch
+                    )
+                    self.trainer.writer.add_scalar(
+                        "val_finegrained/Rec50_{}".format(cls_name), metrics[0.5].get(rec_key, float("nan")) * 100, current_epoch
+                    )
+                if self.trainer.cfg.enable_wandb:
+                    wandb_dict = {
+                        "Epoch": current_epoch,
+                        "val/loss": loss_avg,
+                        "val/AP25": ap25,
+                        "val/AP50": ap50,
+                        "val/AR25": ar25,
+                        "val/AR50": ar50,
+                        "val/mIoU": m_iou,
+                        "val/mAcc": m_acc,
+                        "val/allAcc": all_acc,
+                    }
+                    for cls_id, name in enumerate(seg_names[:seg_num_classes]):
+                        wandb_dict["val_finegrained/IoU_{}".format(name)] = float(iou_class[cls_id])
+                        wandb_dict["val_finegrained/OA_{}".format(name)] = float(acc_class[cls_id])
+                    for cls_name in class_names:
+                        ap_key = "{} Average Precision".format(cls_name)
+                        rec_key = "{} Recall".format(cls_name)
+                        wandb_dict["val_finegrained/AP25_{}".format(cls_name)] = metrics[0.25].get(ap_key, float("nan")) * 100
+                        wandb_dict["val_finegrained/AP50_{}".format(cls_name)] = metrics[0.5].get(ap_key, float("nan")) * 100
+                        wandb_dict["val_finegrained/Rec25_{}".format(cls_name)] = metrics[0.25].get(rec_key, float("nan")) * 100
+                        wandb_dict["val_finegrained/Rec50_{}".format(cls_name)] = metrics[0.5].get(rec_key, float("nan")) * 100
+                    wandb.log(wandb_dict, step=wandb.run.step)
+
+            # Surface uncertainty σ values when the model uses learnable
+            # multi-task weighting. Read from the unwrapped (DDP-unaware)
+            # module so we can pull the log_sigma_sq_* parameters.
+            mt_model = (
+                self.trainer.model.module
+                if hasattr(self.trainer.model, "module")
+                else self.trainer.model
+            )
+            if getattr(mt_model, "loss_weighting", "fixed") == "uncertainty":
+                sigma_seg = float(
+                    torch.exp(0.5 * mt_model.log_sigma_sq_seg).item()
+                )
+                sigma_det = float(
+                    torch.exp(0.5 * mt_model.log_sigma_sq_det).item()
+                )
+                self.trainer.logger.info(
+                    "Loss weighting: sigma_seg={:.4f}  sigma_det={:.4f}".format(
+                        sigma_seg, sigma_det
+                    )
+                )
+                if self.trainer.writer is not None:
+                    self.trainer.writer.add_scalar(
+                        "val/sigma_seg", sigma_seg, current_epoch
+                    )
+                    self.trainer.writer.add_scalar(
+                        "val/sigma_det", sigma_det, current_epoch
+                    )
+                    if self.trainer.cfg.enable_wandb:
+                        wandb.log(
+                            {
+                                "val/sigma_seg": sigma_seg,
+                                "val/sigma_det": sigma_det,
+                            },
+                            step=wandb.run.step,
+                        )
+
+            self.trainer.logger.info(
+                "<<<<<<<<<<<<<<<<< End Multi-Task Evaluation <<<<<<<<<<<<<<<<<"
+            )
+            self.trainer.comm_info["current_metric_value"] = ap50
+            self.trainer.comm_info["current_metric_name"] = "AP50"
+
+    def after_train(self):
+        self.trainer.logger.info(
+            "Best AP50: {:.2f}".format(self.trainer.best_metric_value)
+        )
+

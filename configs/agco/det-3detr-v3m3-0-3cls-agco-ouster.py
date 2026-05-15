@@ -199,6 +199,7 @@ data = dict(
             *det_crop_transforms,
             dict(type="RandomFlipDetection", p_x=0.0, p_y=0.5),
             dict(type="RandomRotateZDetection", angle_deg=(-5.0, 5.0)),
+            dict(type="GridSampleDetection", grid_size=0.05),
             dict(type="PointSubsampleDetection", num_points=num_points),
         ],
     ),
@@ -224,6 +225,7 @@ data = dict(
         residual_rpy_warn_deg=10.0,
         transform=[
             *det_crop_transforms,
+            dict(type="GridSampleDetection", grid_size=0.05),
             dict(type="PointSubsampleDetection", num_points=num_points),
         ],
     ),
@@ -249,6 +251,7 @@ data = dict(
         residual_rpy_warn_deg=10.0,
         transform=[
             *det_crop_transforms,
+            dict(type="GridSampleDetection", grid_size=0.05),
             dict(type="PointSubsampleDetection", num_points=num_points),
         ],
     ),

@@ -297,6 +297,9 @@ class AgcoBBoxV1(Dataset):
         deterministic_debug: bool = False,
         deterministic_seed: int = 0,
         debug_roundtrip_check: bool = False,
+        load_segment: bool = False,
+        segment_subdir: str = "segment",
+        seg_label_map: dict | None = None,
         max_num_obj: int = 64,
         sample_allowlist_file: str = None,
         sample_allowlist_mode: str = "exact",
@@ -371,6 +374,9 @@ class AgcoBBoxV1(Dataset):
         self.deterministic_debug = bool(deterministic_debug)
         self.deterministic_seed = int(deterministic_seed)
         self.debug_roundtrip_check = bool(debug_roundtrip_check)
+        self.load_segment = bool(load_segment)
+        self.segment_subdir = str(segment_subdir)
+        self.seg_label_map = dict(seg_label_map) if seg_label_map is not None else None
         self.sample_allowlist_file = sample_allowlist_file
         self.sample_allowlist_mode = str(sample_allowlist_mode)
         self.center_normalizing_range = [
@@ -557,6 +563,13 @@ class AgcoBBoxV1(Dataset):
                 f"Unexpected point cloud shape {pts.shape} at {coord_path}"
             )
         pts = pts[:, :3]
+        # Some sensors (e.g. Ouster) store an organized grid where invalid
+        # returns are encoded as zero-range points. Drop those so the cloud
+        # only contains real returns and lines up with the segment / intensity
+        # files (which are valid-only).
+        valid_mask = np.any(pts != 0, axis=1)
+        pts = pts[valid_mask]
+        
         if self.use_color:
             color_path = os.path.join(
                 abs_root, sensor, "color", f"{ts}.npy"
@@ -568,12 +581,15 @@ class AgcoBBoxV1(Dataset):
                     f"expected ({pts.shape[0]}, 3)"
                 )
             pts = np.concatenate([pts, rgb], axis=1)
+            
         if self.use_intensity:
             intensity_path = os.path.join(
                 abs_root, sensor, "pointcloud_raw", "intensity", f"{ts}.npy"
             )
             if os.path.isfile(intensity_path):
                 intensity = np.load(intensity_path).astype(np.float32)
+                if intensity.shape[0] == valid_mask.shape[0]:
+                    intensity = intensity[valid_mask]
                 pts = np.concatenate([pts, intensity[:, None]], axis=1)
             else:
                 pts = np.concatenate(
@@ -643,6 +659,25 @@ class AgcoBBoxV1(Dataset):
         R = self.r_levels[ridx]
 
         point_cloud = self._load_scan(abs_root, sensor, ts)
+        segment = None
+        if self.load_segment:
+            seg_path = os.path.join(
+                abs_root, sensor, self.segment_subdir, f"{ts}.npy"
+            )
+            if not os.path.exists(seg_path):
+                raise FileNotFoundError(
+                    f"AgcoBBoxV1.load_segment=True but segment file is missing: "
+                    f"{seg_path}"
+                )
+            segment = np.load(seg_path).astype(np.int64)
+            if segment.shape[0] != point_cloud.shape[0]:
+                raise ValueError(
+                    f"Segment label count ({segment.shape[0]}) does not match "
+                    f"point count ({point_cloud.shape[0]}) for {seg_path}."
+                )
+            if self.seg_label_map is not None:
+                for src, dst in self.seg_label_map.items():
+                    segment[segment == src] = dst
         centers_raw, sizes_raw, quats_xyzw, labels_raw = self._load_boxes(
             abs_root, sensor, ts
         )
@@ -719,8 +754,11 @@ class AgcoBBoxV1(Dataset):
             "sensor": sensor,
             "sample_index": int(idx % len(self.samples)),
         }
+        if segment is not None:
+            data_dict["segment"] = segment
         data_dict = self.transform(data_dict)
         point_cloud = data_dict["point_cloud"]
+        segment = data_dict.get("segment")  # None when load_segment is False
         centers_raw = data_dict["gt_box_centers_raw"]
         sizes_raw = data_dict["gt_box_sizes_raw"]
         yaws_raw = data_dict["gt_box_angles_raw"]
@@ -736,7 +774,9 @@ class AgcoBBoxV1(Dataset):
                     choices = rng.choice(point_cloud.shape[0], self.num_points, replace=True)
                 point_cloud = point_cloud[choices]
             else:
-                point_cloud, _ = _random_sampling(point_cloud, self.num_points)
+                point_cloud, choices = _random_sampling(point_cloud, self.num_points)
+            if segment is not None:
+                segment = segment[choices]
         point_cloud = point_cloud.astype(np.float32)
 
         # Pad to 9 feature channels for the Utonia (PT-v3m3) pre-encoder,
@@ -827,7 +867,7 @@ class AgcoBBoxV1(Dataset):
             roundtrip_diag["center_l2_mean"] = float(np.mean(center_err))
             roundtrip_diag["center_l2_max"] = float(np.max(center_err))
 
-        return {
+        out = {
             "point_clouds": point_cloud,
             "point_cloud_dims_min": point_cloud_dims_min,
             "point_cloud_dims_max": point_cloud_dims_max,
@@ -855,3 +895,6 @@ class AgcoBBoxV1(Dataset):
             },
             "roundtrip_diag": roundtrip_diag,
         }
+        if segment is not None:
+            out["segment"] = segment.astype(np.int64)
+        return out

@@ -200,6 +200,7 @@ data = dict(
         residual_rpy_warn_deg=10.0,
         transform=[
             *det_crop_transforms,
+            dict(type="GridSampleDetection", grid_size=0.05),
             dict(type="PointSubsampleDetection", num_points=num_points, deterministic=True, seed=0),
         ],
     ),
@@ -226,6 +227,7 @@ data = dict(
         residual_rpy_warn_deg=10.0,
         transform=[
             *det_crop_transforms,
+            dict(type="GridSampleDetection", grid_size=0.05),
             dict(type="PointSubsampleDetection", num_points=num_points, deterministic=True, seed=0),
         ],
     ),
@@ -252,6 +254,7 @@ data = dict(
         residual_rpy_warn_deg=10.0,
         transform=[
             *det_crop_transforms,
+            dict(type="GridSampleDetection", grid_size=0.05),
             dict(type="PointSubsampleDetection", num_points=num_points, deterministic=True, seed=0),
         ],
     ),

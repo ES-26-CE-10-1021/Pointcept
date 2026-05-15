@@ -5,11 +5,50 @@ This note is split by dataset:
 - **ScanNet configs**: `configs/scannet/det-3detr-*.py`
 - **AGCO configs**: `configs/agco/det-3detr-*.py`
 
+> **Looking for the multi-task model?** The joint semseg + 3DETR detection
+> path (`MultiTask3DETRSegmentor`, `CombinedSegDetEvaluator`,
+> `CombinedSegDetTester`, the `multitask-3detr-ptv3-*` configs, the
+> uncertainty-weighted loss combination, and the AGCO segmentation label
+> layout) is documented separately in
+> [`multitask_ptv3_3detr.md`](multitask_ptv3_3detr.md). This file covers
+> the detection-only configs.
+
 ## ScanNet dataset configs
 
 ScanNet 3DETR configs are 18-class detection with axis-aligned boxes and use
 the `ScanNetDetectionDataset` dataloader (`pointcept/datasets/scannet_detection.py`,
 VoteNet-style preprocessed layout).
+
+**Augmentation** is config-driven via a `transform=[...]` list (Pointcept-style).
+The same pipeline now drives **both** ScanNet (`ScanNetDetectionDataset`) and
+AGCO (`AgcoBBoxV1`) — ScanNet's legacy `augment=True` /
+`random_cuboid_min_points` kwargs were removed and replaced by the same
+detection-aware transform list. ScanNet keeps `use_color`, `use_height`, and
+`utonia_preprocess` as deterministic dataset kwargs that run before the
+transform pipeline. PTv3-using ScanNet configs (v2/v3/v4 + all utonia
+variants) include `GridSampleDetection` in every split's transform list with
+`grid_size` matching the pre-encoder. Both datasets accept an optional
+`load_segment=False` kwarg for the upcoming multi-task semseg branch.
+
+Detection-aware transforms registered in `pointcept/datasets/det_transform.py`:
+
+| Transform                  | Knobs                                                             |
+|----------------------------|-------------------------------------------------------------------|
+| `RandomFlipDetection`      | `p_x`, `p_y` — independent X/Y mirror; updates centers + yaws.     |
+| `RandomRotateZDetection`   | `angle_deg=(lo, hi)` in degrees; rotates points + centers + yaws.  |
+| `RandomScaleDetection`     | `scale=(lo, hi)`, `apply_to_sizes=True`.                           |
+| `RandomJitterDetection`    | `sigma`, `clip` — Gaussian jitter on point XYZ only.               |
+| `RandomCuboidDetection`    | `min_points`, `aspect`, `min_crop`, `max_crop`; filters boxes.     |
+| `GridSampleDetection`      | `grid_size`, `hash_type`; one random point per voxel (mirrors seg `GridSample` train mode). Place after geometric augs, before `PointSubsampleDetection`. Required for PTv3 pre-encoders so the input contract (one feature per voxel) is honoured. |
+| `PointSubsampleDetection`  | `num_points` — fixed-size subsample; dataset enforces as fallback. |
+
+All point-subsampling / point-cropping transforms (`RandomCuboidDetection`,
+`SphericalCropDetection`, `FovCropDetection`, `GridSampleDetection`,
+`PointSubsampleDetection`) index every key in `det_transform._PER_POINT_KEYS`
+(currently `point_cloud` and `segment`) in lockstep, so optional per-point
+labels for the upcoming multi-task semseg branch survive the pipeline.
+
+Legacy `augment` and `random_cuboid_min_points` kwargs were removed.
 
 ## Config summary
 

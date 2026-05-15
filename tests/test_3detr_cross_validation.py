@@ -209,7 +209,9 @@ class TestDatasetAlignment:
             num_points=40000,
             use_color=False,
             use_height=False,
-            augment=False,
+            transform=[
+                dict(type="PointSubsampleDetection", num_points=40000),
+            ],
         )
         return native_ds, pc_ds
 
