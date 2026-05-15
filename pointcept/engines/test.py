@@ -1917,8 +1917,9 @@ class CombinedSegDetTester(TesterBase):
         ``data.names`` (list[str]): semseg class names (optional).
     """
 
-    def __init__(self, cfg, model=None, test_loader=None, verbose=False):
+    def __init__(self, cfg, model=None, test_loader=None, verbose=False, save_predictions=False):
         super().__init__(cfg, model, test_loader, verbose)
+        self.save_predictions = save_predictions
 
     def test(self):
         from pointcept.models.detection_3detr.dataset_config import _setup_3detr_path
@@ -1967,6 +1968,20 @@ class CombinedSegDetTester(TesterBase):
 
         self.model.eval()
 
+        # ── Prediction-saving setup (rank-0 makes the dir). ────────────────
+        predictions_dir = None
+        if self.save_predictions:
+            predictions_dir = os.path.join(self.cfg.save_path, "predictions")
+            if comm.is_main_process():
+                make_dirs(predictions_dir)
+            comm.synchronize()
+
+        dataset = self.test_loader.dataset
+        local_scan_meta = {}
+        local_gt_boxes = {}
+        local_seg = {}
+        local_scan_counter = 0
+
         for idx, batch in enumerate(self.test_loader):
             for key in batch:
                 if isinstance(batch[key], torch.Tensor):
@@ -1990,6 +2005,124 @@ class CombinedSegDetTester(TesterBase):
             union_meter.update(union.cpu().numpy())
             target_meter.update(target.cpu().numpy())
 
+            # ── Per-scan persistence (det + seg). ──────────────────────────
+            if self.save_predictions:
+                B = batch["scan_idx"].shape[0]
+                seg_pred_dense = (
+                    outputs["seg_logits"].argmax(dim=1).view(B, -1).cpu().numpy()
+                )
+                seg_gt_dense = (
+                    batch["segment"].view(B, -1).cpu().numpy()
+                    if "segment" in batch
+                    else None
+                )
+
+                for b in range(B):
+                    s_idx = batch["scan_idx"][b].item()
+                    ridx, sensor, ts = dataset.samples[s_idx % len(dataset.samples)]
+                    abs_root = dataset.roots[ridx]
+                    coord_path = os.path.join(
+                        str(abs_root), sensor, "pointcloud_raw", "coord", f"{ts}.npy"
+                    )
+
+                    local_scan_meta[local_scan_counter] = {
+                        "scan_idx": s_idx,
+                        "sensor": sensor,
+                        "timestamp": ts,
+                        "annotation_root": str(abs_root),
+                        "coord_path": coord_path,
+                        "point_cloud_dims_min": batch["point_cloud_dims_min"][b].cpu().numpy().tolist(),
+                        "point_cloud_dims_max": batch["point_cloud_dims_max"][b].cpu().numpy().tolist(),
+                        "diagnostics": {},
+                        "frame_id": "agco_lidar_canonical",
+                    }
+                    if "frame_meta" in batch:
+                        fm = batch["frame_meta"]
+                        if isinstance(fm, list):
+                            local_scan_meta[local_scan_counter]["frame_meta"] = fm[b]
+                        elif isinstance(fm, dict):
+                            curr = {}
+                            for k, v in fm.items():
+                                if isinstance(v, torch.Tensor):
+                                    curr[k] = v[b].item() if v.ndim > 0 else v.item()
+                                elif isinstance(v, list):
+                                    curr[k] = v[b]
+                                else:
+                                    curr[k] = v
+                            local_scan_meta[local_scan_counter]["frame_meta"] = curr
+                    if "roundtrip_diag" in batch:
+                        rd = batch["roundtrip_diag"]
+                        if isinstance(rd, list):
+                            local_scan_meta[local_scan_counter]["roundtrip_diag"] = rd[b]
+                        elif isinstance(rd, dict):
+                            curr = {}
+                            for k, v in rd.items():
+                                if isinstance(v, torch.Tensor):
+                                    curr[k] = v[b].item() if v.ndim > 0 else v.item()
+                                elif isinstance(v, list):
+                                    curr[k] = v[b]
+                                else:
+                                    curr[k] = v
+                            local_scan_meta[local_scan_counter]["roundtrip_diag"] = curr
+
+                    np.save(
+                        os.path.join(predictions_dir, f"{s_idx}_points.npy"),
+                        batch["point_clouds"][b].cpu().numpy(),
+                    )
+
+                    np.save(
+                        os.path.join(predictions_dir, f"{s_idx}_seg_pred.npy"),
+                        seg_pred_dense[b],
+                    )
+                    seg_entry = {
+                        "pred_file": f"{s_idx}_seg_pred.npy",
+                        "gt_file": None,
+                    }
+                    if seg_gt_dense is not None:
+                        np.save(
+                            os.path.join(predictions_dir, f"{s_idx}_seg_gt.npy"),
+                            seg_gt_dense[b],
+                        )
+                        seg_entry["gt_file"] = f"{s_idx}_seg_gt.npy"
+                    local_seg[local_scan_counter] = seg_entry
+
+                    gt_boxes = []
+                    gt_boxes_param = []
+                    if "gt_box_corners" in batch:
+                        corners = batch["gt_box_corners"][b].cpu().numpy()
+                        centers = batch["gt_box_centers"][b].cpu().numpy()
+                        sizes = batch["gt_box_sizes"][b].cpu().numpy()
+                        angles = batch["gt_box_angles"][b].cpu().numpy()
+                        labels = batch["gt_box_sem_cls_label"][b].cpu().numpy()
+                        present = batch["gt_box_present"][b].cpu().numpy()
+                        center_delta = []
+                        for i, (c, l, p) in enumerate(zip(corners, labels, present)):
+                            if p > 0.5:
+                                center_delta.append(np.linalg.norm(np.mean(c, axis=0) - centers[i]))
+                                gt_boxes.append((int(l), c.tolist()))
+                                gt_boxes_param.append(
+                                    {
+                                        "class_idx": int(l),
+                                        "center": centers[i].tolist(),
+                                        "size": sizes[i].tolist(),
+                                        "yaw": float(angles[i]),
+                                    }
+                                )
+                        if center_delta:
+                            local_scan_meta[local_scan_counter]["diagnostics"] = {
+                                "num_gt": int(len(center_delta)),
+                                "mean_l2_center_delta_corners_vs_gt_centers": float(np.mean(center_delta)),
+                                "max_l2_center_delta_corners_vs_gt_centers": float(np.max(center_delta)),
+                                "sample_gt_centers": centers[present > 0.5][:3].tolist(),
+                                "sample_gt_sizes": sizes[present > 0.5][:3].tolist(),
+                                "sample_gt_angles": angles[present > 0.5][:3].tolist(),
+                            }
+                    local_gt_boxes[local_scan_counter] = {
+                        "corners": gt_boxes,
+                        "param": gt_boxes_param,
+                    }
+                    local_scan_counter += 1
+
             if (idx + 1) % 50 == 0 or (idx + 1) == len(self.test_loader):
                 logger.info(
                     "Test: [{iter}/{max_iter}]".format(
@@ -2001,6 +2134,9 @@ class CombinedSegDetTester(TesterBase):
         comm.synchronize()
         all_pred = comm.gather(ap_calculator.pred_map_cls, dst=0)
         all_gt = comm.gather(ap_calculator.gt_map_cls, dst=0)
+        all_meta = comm.gather(local_scan_meta, dst=0) if self.save_predictions else None
+        all_gt_boxes = comm.gather(local_gt_boxes, dst=0) if self.save_predictions else None
+        all_seg = comm.gather(local_seg, dst=0) if self.save_predictions else None
 
         # ── Aggregate seg IoU. ─────────────────────────────────────────────
         intersection = intersection_meter.sum
@@ -2013,11 +2149,26 @@ class CombinedSegDetTester(TesterBase):
         all_acc = float(sum(intersection) / (sum(target) + 1e-10))
 
         if comm.is_main_process():
-            merged_pred, merged_gt, scan_cnt = {}, {}, 0
-            for pred_dict, gt_dict in zip(all_pred, all_gt):
+            merged_pred, merged_gt, merged_meta, merged_gt_boxes, merged_seg, scan_cnt = (
+                {}, {}, {}, {}, {}, 0
+            )
+            if self.save_predictions:
+                iterator = zip(all_pred, all_gt, all_meta, all_gt_boxes, all_seg)
+            else:
+                iterator = zip(
+                    all_pred, all_gt,
+                    [{}] * len(all_pred), [{}] * len(all_pred), [{}] * len(all_pred),
+                )
+            for pred_dict, gt_dict, meta_dict, gt_boxes_dict, seg_dict in iterator:
                 for local_id in sorted(pred_dict.keys()):
                     merged_pred[scan_cnt] = pred_dict[local_id]
                     merged_gt[scan_cnt] = gt_dict[local_id]
+                    if local_id in meta_dict:
+                        merged_meta[scan_cnt] = meta_dict[local_id]
+                    if local_id in gt_boxes_dict:
+                        merged_gt_boxes[scan_cnt] = gt_boxes_dict[local_id]
+                    if local_id in seg_dict:
+                        merged_seg[scan_cnt] = seg_dict[local_id]
                     scan_cnt += 1
             ap_calculator.pred_map_cls = merged_pred
             ap_calculator.gt_map_cls = merged_gt
@@ -2081,6 +2232,134 @@ class CombinedSegDetTester(TesterBase):
                         wandb_dict["test_finegrained/Rec25_{}".format(cls_name)] = metrics[0.25].get(rec_key, float("nan")) * 100
                         wandb_dict["test_finegrained/Rec50_{}".format(cls_name)] = metrics[0.5].get(rec_key, float("nan")) * 100
                     wandb.log(wandb_dict)
+
+            if self.save_predictions:
+                dataset_cfg_diag = {
+                    "split": getattr(dataset, "split", None),
+                    "num_points": getattr(dataset, "num_points", None),
+                    "min_inliers": getattr(dataset, "min_inliers", None),
+                    "apply_t_rtk": getattr(dataset, "apply_t_rtk", None),
+                    "apply_r_global": getattr(dataset, "apply_r_global", None),
+                    "apply_r_level_to_points": getattr(dataset, "apply_r_level_to_points", None),
+                    "apply_r_level_to_boxes": getattr(dataset, "apply_r_level_to_boxes", None),
+                    "sensors": list(getattr(dataset, "sensors", [])) if hasattr(dataset, "sensors") else None,
+                }
+                manifest = []
+                for sc in sorted(merged_meta.keys()):
+                    meta = merged_meta[sc]
+                    s_idx = meta["scan_idx"]
+
+                    preds = [
+                        {
+                            "class_idx": int(cls_int),
+                            "class_name": class_names[cls_int] if cls_int < len(class_names) else str(cls_int),
+                            "score": float(score),
+                            "box_corners": np.asarray(corners).tolist(),
+                        }
+                        for cls_int, corners, score in merged_pred.get(sc, [])
+                    ]
+
+                    gts = [
+                        {
+                            "class_idx": int(cls_int),
+                            "class_name": class_names[cls_int] if cls_int < len(class_names) else str(cls_int),
+                            "box_corners": corners,
+                        }
+                        for cls_int, corners in merged_gt_boxes.get(sc, {}).get("corners", [])
+                    ]
+
+                    gts_param = [
+                        {
+                            **box,
+                            "class_name": class_names[box["class_idx"]]
+                            if box["class_idx"] < len(class_names)
+                            else str(box["class_idx"]),
+                        }
+                        for box in merged_gt_boxes.get(sc, {}).get("param", [])
+                    ]
+
+                    seg_entry = merged_seg.get(sc, {})
+                    seg_pred_file = seg_entry.get("pred_file")
+                    seg_gt_file = seg_entry.get("gt_file")
+                    scan_seg_summary = None
+                    if seg_pred_file is not None:
+                        sp = np.load(os.path.join(predictions_dir, seg_pred_file))
+                        sg = (
+                            np.load(os.path.join(predictions_dir, seg_gt_file))
+                            if seg_gt_file is not None
+                            else None
+                        )
+                        if sg is not None:
+                            valid = sg != seg_ignore_index
+                            per_class_iou = {}
+                            for c in range(seg_num_classes):
+                                pred_c = (sp == c) & valid
+                                gt_c = (sg == c) & valid
+                                inter = int(np.logical_and(pred_c, gt_c).sum())
+                                union_c = int(np.logical_or(pred_c, gt_c).sum())
+                                per_class_iou[seg_names[c]] = (
+                                    float(inter) / float(union_c) if union_c > 0 else None
+                                )
+                            scan_seg_summary = {
+                                "per_class_iou": per_class_iou,
+                                "num_points_valid": int(valid.sum()),
+                                "num_points_total": int(sg.size),
+                            }
+
+                    record = {
+                        **meta,
+                        "class_names": class_names,
+                        "seg_class_names": seg_names[:seg_num_classes],
+                        "dataset_config_diagnostics": dataset_cfg_diag,
+                        "predictions": preds,
+                        "gt_boxes": gts,
+                        "gt_boxes_param": gts_param,
+                        "seg_pred_file": seg_pred_file,
+                        "seg_gt_file": seg_gt_file,
+                        "seg_per_scan": scan_seg_summary,
+                    }
+                    json_path = os.path.join(predictions_dir, f"{s_idx}.json")
+                    with open(json_path, "w") as f:
+                        json.dump(record, f)
+
+                    manifest.append({
+                        "scan_idx": s_idx,
+                        "json_file": f"{s_idx}.json",
+                        "points_file": f"{s_idx}_points.npy",
+                        "seg_pred_file": seg_pred_file,
+                        "seg_gt_file": seg_gt_file,
+                    })
+
+                with open(os.path.join(predictions_dir, "manifest.json"), "w") as f:
+                    json.dump(manifest, f, indent=2)
+
+                summary = {
+                    "AP25": float(ap25),
+                    "AP50": float(ap50),
+                    "AR25": float(ar25),
+                    "AR50": float(ar50),
+                    "mIoU": float(m_iou),
+                    "mAcc": float(m_acc),
+                    "allAcc": float(all_acc),
+                    "iou_per_class": {
+                        seg_names[c]: float(iou_class[c]) for c in range(seg_num_classes)
+                    },
+                    "acc_per_class": {
+                        seg_names[c]: float(acc_class[c]) for c in range(seg_num_classes)
+                    },
+                }
+                rtrip = [
+                    m.get("roundtrip_diag", {})
+                    for m in merged_meta.values()
+                    if m.get("roundtrip_diag")
+                ]
+                if rtrip:
+                    summary["roundtrip_center_l2_mean"] = float(np.mean([d["center_l2_mean"] for d in rtrip]))
+                    summary["roundtrip_center_l2_max"] = float(np.max([d["center_l2_max"] for d in rtrip]))
+                with open(os.path.join(predictions_dir, "metrics.json"), "w") as f:
+                    json.dump(summary, f, indent=2)
+
+                logger.info(f"Predictions saved to {predictions_dir} ({len(manifest)} scans)")
 
             logger.info(
                 "<<<<<<<<<<<<<<<<< End Multi-Task Evaluation <<<<<<<<<<<<<<<<<"

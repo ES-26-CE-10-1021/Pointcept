@@ -243,4 +243,4 @@ hooks = [
 ]
 
 # ── Tester ───────────────────────────────────────────────────────────────────
-test = dict(type="CombinedSegDetTester", verbose=True)
+test = dict(type="CombinedSegDetTester", verbose=True, save_predictions=True)
