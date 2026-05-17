@@ -75,6 +75,14 @@ class PTv3PreEncoder(PointTransformerV3):
                 features: (B, C, npoint) gathered features
                 inds:     (B, npoint) FPS indices
         """
+        # PTv3 was designed with feat = [xyz, rgb, ...] (matching its semseg
+        # pretraining). When dense features are provided, concat xyz so the
+        # embedding sees the full channel layout (in_channels = 3 + features.C).
+        # When features=None, dense2point falls back to feat = xyz.
+        if features is not None:
+            features = torch.cat(
+                [xyz.transpose(1, 2).contiguous(), features], dim=1
+            )
         point = dense2point(xyz, features)
         point["grid_size"] = self.grid_size
 
@@ -151,6 +159,12 @@ class PTv3UNetPreEncoder(PointTransformerV3):
         Returns:
             Point with decoded features at initial voxel resolution.
         """
+        # See PTv3PreEncoder.forward: prepend xyz to feat to match PTv3's
+        # [xyz, rgb, ...] embedding convention when features are provided.
+        if features is not None:
+            features = torch.cat(
+                [xyz.transpose(1, 2).contiguous(), features], dim=1
+            )
         point = dense2point(xyz, features)
         point["grid_size"] = self.grid_size
 
