@@ -72,6 +72,7 @@ torchaudio  = { version = "==2.7.0",  index = "https://download.pytorch.org/whl/
 # torch-dependent packages
 timm           = "*"
 peft           = "*"
+open3d         = "*"
 tensorboard    = "*"
 tensorboardx   = "*"
 wandb          = "*"

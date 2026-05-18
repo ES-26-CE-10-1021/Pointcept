@@ -8,6 +8,11 @@ export CUDA_HOME="${CONDA_PREFIX}"
 export CC="${CONDA_PREFIX}/bin/gcc"
 export CXX="${CONDA_PREFIX}/bin/g++"
 export CPATH="${CONDA_PREFIX}/targets/x86_64-linux/include:${CPATH:-}"
+
+# Make env-provided shared libs (libGL.so.1 from libglvnd, etc.) findable at
+# runtime. Pixi doesn't auto-export LD_LIBRARY_PATH like classic conda envs do,
+# which breaks dlopen()-based loads such as open3d's ctypes import of pybind.
+export LD_LIBRARY_PATH="${CONDA_PREFIX}/lib:${LD_LIBRARY_PATH:-}"
  
 # Source builds (pointops etc.) compile against this arch list. Append +PTX so
 # the resulting cubins also carry forward-compatible PTX for newer GPUs.
