@@ -63,15 +63,8 @@ echo "==> Building 3DETR cython utils"
 echo "==> Building PointRoPE (LitePT)"
 pip install --no-build-isolation ./third_party/LitePT/libs/pointrope
 
-# ---------------------------------------------------------------------------
-# Optional: FlashAttention-4 (Blackwell-native, BETA, different API from FA2).
-# PTv3 / Pointcept / 3DETR import from `flash_attn` (FA2 API); FA4 exposes
-# `flash_attn.cute`. Installing alone won't help — needs code patching. The
-# safer default is PyTorch's torch.nn.functional.scaled_dot_product_attention,
-# which has Blackwell SDPA kernels in PyTorch >= 2.7. Uncomment once ready:
-#
-pip install flash-attn-4==4.0.0b13
-# ---------------------------------------------------------------------------
+echo "==> Building flash-attn 2.8.3"
+MAX_JOBS=8 pip install --no-build-isolation flash-attn==2.8.3
 
 echo ""
 echo "==> post-install complete. Verify with: pixi run smoke-test"

@@ -63,15 +63,41 @@ def main() -> int:
     check("peft",            lambda: __import__("peft"))
     check("timm",            lambda: __import__("timm"))
 
-    # ---------------- soft checks ----------------
+    # ---------------- flash-attn ----------------
 
-    # FA4 is Blackwell-native but its API lives under flash_attn.cute, not the
-    # FA2-compatible flash_attn namespace that PTv3 / Pointcept / 3DETR import
-    # from. This check confirms FA4 itself loaded; it does NOT mean upstream
-    # code is using it — that requires patching call sites.
-    def fa4_cute():
-        from flash_attn.cute import flash_attn_func  # noqa: F401
-    check("flash_attn.cute (FA4)", fa4_cute, soft=True)
+    # FA2 is the actual runtime dep for PTv3 / Pointcept / 3DETR attention.
+    # On B200, FA2's runtime cc_major>=8 check accepts Blackwell, and its
+    # setup.py compiles sm_100 kernels via PTX re-targeting. Hard check —
+    # broken install would silently fall back to the slow non-flash path.
+    def fa2_import():
+        import flash_attn
+        fn = flash_attn.flash_attn_varlen_qkvpacked_func
+        print(f"          flash_attn varlen fn: {fn.__module__}")
+
+    check("flash_attn (FA2) import", fa2_import)
+
+    # Actually launch the FA2 varlen kernel on this GPU. head_dim=16 covers
+    # the PTv3 base configs; head_dim=18 covers Utonia (PT-v3m3) and exercises
+    # FA2's internal pad-to-multiple-of-8 path (FA4 hard-rejects non-mult-of-8,
+    # which is the reason we switched off it).
+    if torch.cuda.is_available():
+        def fa2_varlen_forward():
+            from flash_attn import flash_attn_varlen_qkvpacked_func
+            for head_dim in (16, 18):
+                K, H, B = 64, 2, 2
+                qkv = torch.randn(
+                    B * K, 3, H, head_dim,
+                    device="cuda", dtype=torch.bfloat16,
+                )
+                cu_seqlens = torch.arange(
+                    0, B * K + 1, K, device="cuda", dtype=torch.int32,
+                )
+                out = flash_attn_varlen_qkvpacked_func(qkv, cu_seqlens, max_seqlen=K)
+                assert out.shape == (B * K, H, head_dim), (
+                    f"unexpected shape {tuple(out.shape)} for head_dim={head_dim}"
+                )
+
+        check("flash_attn varlen forward (head_dim 16 + 18)", fa2_varlen_forward)
 
     # ---------------- end-to-end GPU exercise ----------------
     if torch.cuda.is_available():
