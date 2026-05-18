@@ -1,0 +1,108 @@
+# pixi.toml
+# Pointcept env for UCloud DeiC Interactive HPC (NVIDIA B200, Blackwell, sm_100).
+#
+# Layout:
+#   - This file declares the standard, well-behaved dependencies (conda + pip).
+#   - scripts/activate.sh sets CUDA_HOME/CC/CXX/TORCH_CUDA_ARCH_LIST on env entry.
+#   - scripts/post_install.sh handles the parts pixi can't express declaratively:
+#       PyG C extensions (find-links wheels), in-tree source builds, cython compile.
+#   - scripts/smoke_test.py verifies the install.
+#
+# Workflow after the one-time `pixi install`:
+#   pixi run post-install   # builds extensions; re-run after `pixi install`
+#   pixi run smoke-test     # verify
+#   pixi shell              # interactive shell in the env
+
+[workspace]
+name = "pointcept-thesis"
+version = "0.1.0"
+description = "Unified 3D perception for in-field agricultural tasks (UCloud B200)"
+channels = ["nvidia/label/cuda-12.8.1", "nvidia", "conda-forge"]
+platforms = ["linux-64"]
+
+[system-requirements]
+# B200 has CUDA driver supporting 12.8+. Pixi uses this to gate package selection.
+cuda = "12.8"
+
+# ---------------------------------------------------------------------------
+# Conda dependencies — toolchain and pure-Python libs only.
+# Anything with torch in its dep graph belongs in [pypi-dependencies] below,
+# per pixi's guidance to avoid cross-channel torch resolution conflicts.
+# ---------------------------------------------------------------------------
+[dependencies]
+python = "3.10.*"
+pip = "*"
+
+# CUDA toolchain (Blackwell needs 12.8+)
+cuda = "*"
+cudnn = "*"
+gcc = "13.2.*"
+gxx = "13.2.*"
+ninja = "*"
+
+# In-tree extension build deps
+sparsehash = "*"          # pointgroup_ops dependency
+
+# Pure-Python deps (no torch dependency)
+h5py = "*"
+pyyaml = "*"
+yapf = "*"
+addict = "*"
+einops = "*"
+scipy = "*"
+plyfile = "*"
+termcolor = "*"
+ftfy = "*"
+regex = "*"
+tqdm = "*"
+matplotlib = "*"
+black = "*"
+pytest = "*"
+
+# ---------------------------------------------------------------------------
+# PyPI dependencies — torch and anything depending on it.
+# PyTorch's conda channel stopped publishing past pytorch-cuda=12.4 in early
+# 2025, so cu128 pip wheels are the only Blackwell-ready binaries.
+# ---------------------------------------------------------------------------
+[pypi-dependencies]
+torch       = { version = "==2.7.0",  index = "https://download.pytorch.org/whl/cu128" }
+torchvision = { version = "==0.22.0", index = "https://download.pytorch.org/whl/cu128" }
+torchaudio  = { version = "==2.7.0",  index = "https://download.pytorch.org/whl/cu128" }
+
+# torch-dependent packages
+timm           = "*"
+peft           = "*"
+tensorboard    = "*"
+tensorboardx   = "*"
+wandb          = "*"
+
+# spconv: no cu128 wheel exists yet (latest is cu126, Dec 2024). On B200 the
+# cu126 wheel falls back to NVRTC and JIT-compiles sm_100 kernels at first use
+# — slight startup cost, functionally correct. CUDA minor-version compatibility
+# lets the cu126 wheel coexist with a cu128 torch runtime.
+spconv-cu126 = "*"
+
+# PyG core (the C extensions torch-cluster/scatter/sparse are installed
+# in scripts/post_install.sh via the find-links wheel index — pixi cannot
+# express -f-style URLs as native pypi-dependencies.)
+torch-geometric = "*"
+
+# 3DETR cython util deps
+trimesh        = "*"
+opencv-python  = "*"
+cython         = "*"
+
+# ---------------------------------------------------------------------------
+# Activation: scripts/activate.sh sets CUDA_HOME, CC/CXX, TORCH_CUDA_ARCH_LIST
+# whenever `pixi shell` or `pixi run` is invoked. These need CONDA_PREFIX which
+# pixi exports at activation time, so a script is more reliable than [activation.env].
+# ---------------------------------------------------------------------------
+[activation]
+scripts = ["scripts/activate.sh"]
+
+# ---------------------------------------------------------------------------
+# Tasks
+# ---------------------------------------------------------------------------
+[tasks]
+post-install = { cmd = "bash scripts/post_install.sh", description = "Build PyG C-exts + in-tree CUDA extensions. Re-run after any `pixi install`." }
+smoke-test   = { cmd = "python scripts/smoke_test.py", description = "Verify torch/spconv/pointops are usable on the current GPU." }
