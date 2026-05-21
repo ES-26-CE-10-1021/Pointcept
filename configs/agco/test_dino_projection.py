@@ -39,33 +39,37 @@ num_angle_bin = 12
 max_num_obj = 16
 
 # -- DINO ---------------------------------------------------------------------
-dino_feature_dim = 2048
+dino_feature_dim = 1280
 dino_camera = "jai_left"
 dino_dir = "dino_patch_h16plus_full_res"
 
 # -- Model --------------------------------------------------------------------
 model = dict(
-    type="Model3DETRDetector",
+    type="Model3DETRDetectorWithDino",
     pre_encoder=dict(
-        type="PointnetSAPreEncoder",
+        type="PTv3PreEncoderWithDino",        
+        grid_size=0.05,
+        enc_mode=True,
         npoint=2048,
-        radius=0.2,
-        nsample=64,
-        mlp_dims=[0, 64, 128, 256],
-        normalize_xyz=True,
+        in_channels=3,
     ),
     encoder=dict(
-        type="VanillaTransformerEncoder3DETR",
-        encoder_dim=256,
-        nhead=4,
-        nlayers=3,
-        ffn_dim=128,
-        dropout=0.1,
-        activation="relu",
+        type="DinoInjectionEncoder",     
+        inner_encoder=dict(
+            type="VanillaTransformerEncoder3DETR",
+            encoder_dim=512,
+            nhead=4,
+            nlayers=3,
+            ffn_dim=128,
+            dropout=0.1,
+            activation="relu",
+        ),
+        dino_dim=dino_feature_dim,
+        encoder_dim=512, 
     ),
     decoder=dict(
         type="TransformerDecoder3DETR",
-        decoder_dim=256,
+        decoder_dim=512,
         nhead=4,
         nlayers=8,
         ffn_dim=256,
@@ -76,8 +80,8 @@ model = dict(
         num_angle_bin=num_angle_bin,
         included_classes=included_classes,
     ),
-    encoder_dim=256,
-    decoder_dim=256,
+    encoder_dim=512,
+    decoder_dim=512,
     num_queries=32,
     position_embedding="fourier",
     mlp_dropout=0.3,
