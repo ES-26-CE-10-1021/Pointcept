@@ -26,6 +26,7 @@ use and never updated during training.
 import logging
 
 import torch
+import torch_cluster
 import torch_scatter
 from pointcept.models.builder import MODELS, MODULES
 from pointcept.models.point_transformer_v3.point_transformer_v3m1_base import (
@@ -1058,3 +1059,83 @@ class PTv3m3PreEncoderWithDino(PTv3DinoMixin, PTv3m3PreEncoder):
             self._bridge_leaf(point)
 
         return point
+
+
+# ---------------------------------------------------------------------------
+# "True FPS" DINO variants: gather DINO at the single nearest raw input
+# point of each FPS-selected center via torch_cluster.knn(k=1). No DINO
+# threading through the encoder — the base pre-encoder runs unchanged.
+# ---------------------------------------------------------------------------
+
+
+def _dino_true_fps_gather(enc_xyz, raw_xyz, dino_feat):
+    """For each enc center, find nearest raw point and gather its DINO.
+
+    Args:
+        enc_xyz:   (B, M, 3) — FPS-selected center points
+        raw_xyz:   (B, N, 3) — raw input points (same order as ``dino_feat``)
+        dino_feat: (B, N, D) — per-raw-point DINO features
+
+    Returns:
+        (B, D, M) — DINO of the nearest raw point of each enc center.
+    """
+    B, M, _ = enc_xyz.shape
+    N, D = raw_xyz.shape[1], dino_feat.shape[-1]
+    device = enc_xyz.device
+
+    flat_src = raw_xyz.reshape(B * N, 3).contiguous()
+    flat_query = enc_xyz.reshape(B * M, 3).contiguous()
+    batch_s = torch.arange(B, device=device).repeat_interleave(N)
+    batch_q = torch.arange(B, device=device).repeat_interleave(M)
+
+    # torch_cluster.knn returns (2, B*M*k); row 1 holds src indices into flat_src.
+    nn_idx = torch_cluster.knn(
+        x=flat_src,
+        y=flat_query,
+        batch_x=batch_s,
+        batch_y=batch_q,
+        k=1,
+    )[1]
+
+    gathered = dino_feat.reshape(B * N, D)[nn_idx]  # (B*M, D)
+    return gathered.reshape(B, M, D).permute(0, 2, 1).contiguous()  # (B, D, M)
+
+
+@MODULES.register_module("PTv3PreEncoderWithDinoTrueFps")
+class PTv3PreEncoderWithDinoTrueFps(PTv3PreEncoder):
+    """PTv3PreEncoder + post-FPS nearest-raw-point DINO gather.
+
+    Runs the base PTv3 pre-encoder unchanged; then for each of the
+    ``npoint`` FPS-selected centers, gathers the DINO of the single nearest
+    raw input point via ``torch_cluster.knn(k=1)``. No DINO threading
+    inside the encoder.
+    """
+
+    def forward_with_dino(self, xyz, features=None, dino_feat=None):
+        assert (
+            self.npoint is not None
+        ), "PTv3PreEncoderWithDinoTrueFps requires npoint (FPS path)"
+        out_xyz, out_features, fps_inds = self.forward(xyz, features)
+        if dino_feat is None:
+            return out_xyz, out_features, fps_inds, None
+        dino_fps = _dino_true_fps_gather(out_xyz, xyz, dino_feat)
+        return out_xyz, out_features, fps_inds, dino_fps
+
+
+@MODULES.register_module("PTv3m3PreEncoderWithDinoTrueFps")
+class PTv3m3PreEncoderWithDinoTrueFps(PTv3m3PreEncoder):
+    """PTv3m3PreEncoder (Utonia) + post-FPS nearest-raw-point DINO gather.
+
+    ``freeze_backbone`` semantics are inherited unchanged from
+    ``PTv3m3PreEncoder`` since ``forward()`` is called as-is.
+    """
+
+    def forward_with_dino(self, xyz, features=None, dino_feat=None):
+        assert (
+            self.npoint is not None
+        ), "PTv3m3PreEncoderWithDinoTrueFps requires npoint (FPS path)"
+        out_xyz, out_features, fps_inds = self.forward(xyz, features)
+        if dino_feat is None:
+            return out_xyz, out_features, fps_inds, None
+        dino_fps = _dino_true_fps_gather(out_xyz, xyz, dino_feat)
+        return out_xyz, out_features, fps_inds, dino_fps

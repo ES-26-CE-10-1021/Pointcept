@@ -16,6 +16,8 @@ try:
         PTv3PreEncoder,
         PTv3m3PreEncoder,
         PTv3PreEncoderWithDino,
+        PTv3PreEncoderWithDinoTrueFps,
+        PTv3m3PreEncoderWithDinoTrueFps,
         PTv3DinoMixin,
     )
 except ImportError:
