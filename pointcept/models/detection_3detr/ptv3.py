@@ -80,7 +80,7 @@ def _flatten_dino(xyz, dino_feat):
     Returns:
         (B*N, D)
     """
-    print("incoming dino", dino_feat.shape)
+    # print("incoming dino", dino_feat.shape)
     B, N, D = dino_feat.shape
 
     return (
@@ -312,8 +312,8 @@ class PTv3DinoMixin:
             cluster = _raw_to_voxel_cluster(point)
 
             n_vox = point.sparse_conv_feat.features.shape[0]
-            print("before scatter", point["dino_feat"].shape)
-            print("cluster", cluster.shape)
+            # print("before scatter", point["dino_feat"].shape)
+            # print("cluster", cluster.shape)
             point["dino_feat"] = torch_scatter.scatter(
                 point["dino_feat"],
                 # cluster.unsqueeze(0).expand(point["dino_feat"].shape[0], -1),
@@ -324,9 +324,9 @@ class PTv3DinoMixin:
             )
         
 
-        print("point.feat", point.feat.shape)
-        print("dino_feat", point["dino_feat"].shape if "dino_feat" in point else None)
-        print("embedding expects", self.embedding.in_channels)    
+        # print("point.feat", point.feat.shape)
+        # print("dino_feat", point["dino_feat"].shape if "dino_feat" in point else None)
+        # print("embedding expects", self.embedding.in_channels)    
         point = self.embedding(point)
         point = self.enc(point)
 

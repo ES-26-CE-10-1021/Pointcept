@@ -1222,7 +1222,7 @@ class AgcoBBoxDinoV1(Dataset):
             out["segment"] = segment.astype(np.int64)
         if projected_dino is not None:
             assert len(projected_dino) == len(point_cloud), f"projected dino with length {len(projected_dino)} is not equal to point cloud length of {len(point_cloud)}"
-            print(f"projected dino shape {projected_dino.shape}")
+            # print(f"projected dino shape {projected_dino.shape}")
 
             out["dino_feat"] = projected_dino
 
