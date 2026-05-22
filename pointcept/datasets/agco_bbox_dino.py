@@ -47,6 +47,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
+import yaml
 from scipy.spatial.transform import Rotation as Rot
 from torch.utils.data import Dataset
 
@@ -59,7 +60,6 @@ from .scannet_detection import (
     MEAN_COLOR_RGB,  # noqa: F401 - kept for parity; may be used later
     _random_sampling,
 )
-
 
 # Canonical disk label scheme (upstream annotation tool):
 #   0=background (excluded), 1=tractor, 2=harvester, 3=trailer, 4=car, 5=hopper
@@ -75,8 +75,6 @@ _NAME_TO_DISK_LABEL = {
 _DEFAULT_INCLUDED_CLASSES = ("tractor", "harvester", "trailer", "car", "hopper")
 
 
-import csv
-
 def load_lidar_to_frame_map(csv_path):
     lookup = {}
     with open(csv_path, "r") as f:
@@ -91,8 +89,6 @@ def load_lidar_to_frame_map(csv_path):
                 lidar_ts = row[sensor]
                 lookup[(sensor, lidar_ts)] = frame_ts
     return lookup
-
-import numpy as np
 
 
 def project_fisheye_simple_radial(
@@ -156,14 +152,10 @@ def project_fisheye_simple_radial(
         axis=1,
     )
     # Image bounds
-    in_bounds = (
-        (u >= 0)
-        & (u < img_w)
-        & (v >= 0)
-        & (v < img_h)
-    )
+    in_bounds = (u >= 0) & (u < img_w) & (v >= 0) & (v < img_h)
     valid = in_front & in_bounds
     return uv.astype(np.float64), valid
+
 
 def _build_disk_label_to_class(included_classes):
     """Build {disk_label: model_class_idx} from an ordered name tuple.
@@ -178,12 +170,8 @@ def _build_disk_label_to_class(included_classes):
             f"Valid names: {sorted(_NAME_TO_DISK_LABEL.keys())}"
         )
     if len(set(included_classes)) != len(included_classes):
-        raise ValueError(
-            f"Duplicate entries in included_classes: {included_classes}"
-        )
-    return {
-        _NAME_TO_DISK_LABEL[name]: i for i, name in enumerate(included_classes)
-    }
+        raise ValueError(f"Duplicate entries in included_classes: {included_classes}")
+    return {_NAME_TO_DISK_LABEL[name]: i for i, name in enumerate(included_classes)}
 
 
 def _load_r_level(path, require: bool):
@@ -216,8 +204,6 @@ def _load_t_rtk(calib_path: str, sensor: str, require: bool):
     Returns (Rotation, translation_ndarray) or None when file is absent
     and require=False.  RigidTransform is not used — scipy 1.15.2 lacks it.
     """
-    import yaml
-
     if os.path.isfile(calib_path):
         with open(calib_path, "r") as f:
             data = yaml.full_load(f)
@@ -248,18 +234,17 @@ def _load_t_rtk(calib_path: str, sensor: str, require: bool):
     )
     return None
 
+
 def _load_t_rtk_cam(calib_path: str, require: bool):
     """Load per-sensor T_rtk from calibration.yml.
 
     Returns (Rotation, translation_ndarray) or None when file is absent
     and require=False.  RigidTransform is not used — scipy 1.15.2 lacks it.
     """
-    import yaml
-
     if os.path.isfile(calib_path):
         with open(calib_path, "r") as f:
             data = yaml.full_load(f)
-        
+
         T_rtk_cam = np.asarray(data["T_rtk_cam"]["matrix"], dtype=np.float64)
 
         return T_rtk_cam
@@ -296,10 +281,7 @@ def _load_cam_intrinsics(
         }
     """
 
-    import os
-    import yaml
     if os.path.isfile(calib_path):
-
         with open(calib_path, "r") as f:
             data = yaml.safe_load(f)
 
@@ -321,10 +303,7 @@ def _load_cam_intrinsics(
             "height": int(cam_data["height"]),
         }
 
-    raise FileNotFoundError(
-        f"Missing calibration.yml at {calib_path}"
-    )
-
+    raise FileNotFoundError(f"Missing calibration.yml at {calib_path}")
 
 
 def _flip_axis_to_camera_np(points):
@@ -476,7 +455,6 @@ class AgcoBBoxDinoV1(Dataset):
         use_dino=False,
         dino_camera="jai_left",
         dino_subdir="dino_patch_h16plus_full_res",
-        dino_feature_dim=2048,
     ):
         assert split in ("train", "val", "test"), f"Unknown split: {split}"
         assert len(sensors) > 0, "At least one sensor must be specified"
@@ -490,6 +468,7 @@ class AgcoBBoxDinoV1(Dataset):
         self.use_color = bool(use_color)
         self.utonia_preprocess = bool(utonia_preprocess)
         from .transform import Compose
+
         self.transform = Compose(transform or [])
         self.require_gravity_align = bool(require_gravity_align)
         self.residual_rpy_warn_rad = np.deg2rad(float(residual_rpy_warn_deg))
@@ -497,21 +476,22 @@ class AgcoBBoxDinoV1(Dataset):
         self.max_num_obj = int(max_num_obj)
         if isinstance(min_inliers, dict):
             missing = set(self.sensors) - set(min_inliers.keys())
-            assert not missing, (
-                f"min_inliers dict is missing entries for sensors: {sorted(missing)}"
-            )
+            assert (
+                not missing
+            ), f"min_inliers dict is missing entries for sensors: {sorted(missing)}"
             self.min_inliers = {s: int(min_inliers[s]) for s in self.sensors}
         else:
             self.min_inliers = int(min_inliers)
         self.included_classes = tuple(
-            included_classes if included_classes is not None
+            included_classes
+            if included_classes is not None
             else _DEFAULT_INCLUDED_CLASSES
         )
         self.disk_label_to_class = _build_disk_label_to_class(self.included_classes)
         self.nonempty_oversample = float(nonempty_oversample)
-        assert self.nonempty_oversample >= 1.0, (
-            f"nonempty_oversample must be >= 1.0, got {self.nonempty_oversample}"
-        )
+        assert (
+            self.nonempty_oversample >= 1.0
+        ), f"nonempty_oversample must be >= 1.0, got {self.nonempty_oversample}"
 
         # Per-sensor fixed normalization bounds. None -> use per-sample min/max
         # (legacy behavior). Otherwise a dict {sensor: {"min": [..], "max": [..]}}
@@ -519,13 +499,13 @@ class AgcoBBoxDinoV1(Dataset):
         self.fixed_pc_dims = fixed_pc_dims
         self._fixed_pc_dims_arr = None
         if self.fixed_pc_dims is not None:
-            assert isinstance(self.fixed_pc_dims, dict), (
-                f"fixed_pc_dims must be a dict or None, got {type(self.fixed_pc_dims)}"
-            )
+            assert isinstance(
+                self.fixed_pc_dims, dict
+            ), f"fixed_pc_dims must be a dict or None, got {type(self.fixed_pc_dims)}"
             missing = set(self.sensors) - set(self.fixed_pc_dims.keys())
-            assert not missing, (
-                f"fixed_pc_dims is missing entries for sensors: {sorted(missing)}"
-            )
+            assert (
+                not missing
+            ), f"fixed_pc_dims is missing entries for sensors: {sorted(missing)}"
             self._fixed_pc_dims_arr = {}
             for s in self.sensors:
                 entry = self.fixed_pc_dims[s]
@@ -562,27 +542,23 @@ class AgcoBBoxDinoV1(Dataset):
                 f"Unsupported sample_allowlist_mode='{self.sample_allowlist_mode}'. "
                 "Only 'exact' is supported."
             )
-        self.use_dino = use_dino 
+        self.use_dino = use_dino
         self.dino_camera = dino_camera
-        self.dino_subdir = dino_subdir  
-        
+        self.dino_subdir = dino_subdir
+
         self.frame_time_lookup = None
-
-
 
         split_file = os.path.join(meta_data_dir, f"{split_prefix}_{split}.txt")
         with open(split_file, "r") as f:
             roots = [line.strip() for line in f if line.strip()]
 
-        self.roots = []        # absolute paths
-        self.r_levels = []     # scipy Rotation, one per root
+        self.roots = []  # absolute paths
+        self.r_levels = []  # scipy Rotation, one per root
         self.lookup_tables = {}
         for r in roots:
             abs_root = r if os.path.isabs(r) else os.path.join(root_dir, r)
             if not os.path.isdir(abs_root):
-                raise FileNotFoundError(
-                    f"Annotation root does not exist: {abs_root}"
-                )
+                raise FileNotFoundError(f"Annotation root does not exist: {abs_root}")
             self.roots.append(abs_root)
             self.r_levels.append(
                 _load_r_level(
@@ -591,7 +567,9 @@ class AgcoBBoxDinoV1(Dataset):
                 )
             )
             if self.use_dino:
-                self.lookup_tables[abs_root] = load_lidar_to_frame_map(os.path.join(abs_root, "lidar_timetable.csv"))
+                self.lookup_tables[abs_root] = load_lidar_to_frame_map(
+                    os.path.join(abs_root, "lidar_timetable.csv")
+                )
 
         # Build per-(root, sensor) T_rtk map. Loaded once; reused across samples.
         self._t_rtk_map: dict = {}
@@ -605,16 +583,15 @@ class AgcoBBoxDinoV1(Dataset):
                 )
                 self._t_rtk_map[(ridx, sensor)] = result
             self._t_rtk_cam[ridx] = _load_t_rtk_cam(calib_path, require=True)
-            self.camera_intrinsics[ridx] = _load_cam_intrinsics(calib_path, self.dino_camera)
-
+            self.camera_intrinsics[ridx] = _load_cam_intrinsics(
+                calib_path, self.dino_camera
+            )
 
         # Flatten (root_idx, sensor, ts) samples.
         self.samples = []
         for ridx, abs_root in enumerate(self.roots):
             for sensor in self.sensors:
-                coord_dir = os.path.join(
-                    abs_root, sensor, "pointcloud_raw", "coord"
-                )
+                coord_dir = os.path.join(abs_root, sensor, "pointcloud_raw", "coord")
                 bbox_dir = os.path.join(abs_root, sensor, "annotations")
                 if not os.path.isdir(coord_dir) or not os.path.isdir(bbox_dir):
                     continue
@@ -627,9 +604,7 @@ class AgcoBBoxDinoV1(Dataset):
                     if f.endswith(".json")
                 )
                 for ts in timestamps:
-                    if os.path.isfile(
-                        os.path.join(coord_dir, f"{ts}.npy")
-                    ):
+                    if os.path.isfile(os.path.join(coord_dir, f"{ts}.npy")):
                         self.samples.append((ridx, sensor, ts))
 
         n_total = len(self.samples)
@@ -684,9 +659,7 @@ class AgcoBBoxDinoV1(Dataset):
         if not path.is_absolute():
             path = Path(self.meta_data_dir) / path
         if not path.is_file():
-            raise FileNotFoundError(
-                f"sample_allowlist_file not found: {path}"
-            )
+            raise FileNotFoundError(f"sample_allowlist_file not found: {path}")
 
         allow = set()
         malformed = 0
@@ -713,7 +686,7 @@ class AgcoBBoxDinoV1(Dataset):
                 f"sample_allowlist_file {path} produced an empty allowlist"
             )
         return allow, str(path)
-    
+
     def _project_dino_features(
         self,
         pts_xyz,
@@ -761,26 +734,18 @@ class AgcoBBoxDinoV1(Dataset):
         T_rtk_sensor[:3, :3] = t_rot.as_matrix()
         T_rtk_sensor[:3, 3] = t_trans
 
-        T_cam_sensor = (
-            np.linalg.inv(self._t_rtk_cam[ridx])
-            @ T_rtk_sensor
-        )
+        T_cam_sensor = np.linalg.inv(self._t_rtk_cam[ridx]) @ T_rtk_sensor
 
-        pts_cam = (
-            pts_xyz @ T_cam_sensor[:3, :3].T
-            + T_cam_sensor[:3, 3]
-        )
+        pts_cam = pts_xyz @ T_cam_sensor[:3, :3].T + T_cam_sensor[:3, 3]
 
-        uv_patch, valid = (
-            project_fisheye_simple_radial(
-                pts_cam,
-                f=f_patch,
-                cx=cx_patch,
-                cy=cy_patch,
-                k=k,
-                img_w=Wt,
-                img_h=Ht,
-            )
+        uv_patch, valid = project_fisheye_simple_radial(
+            pts_cam,
+            f=f_patch,
+            cx=cx_patch,
+            cy=cy_patch,
+            k=k,
+            img_w=Wt,
+            img_h=Ht,
         )
 
         dino_feats = np.zeros(
@@ -808,23 +773,15 @@ class AgcoBBoxDinoV1(Dataset):
 
         matched = np.zeros_like(inside)
 
-        matched[inside] = (
-            sparse_indices[lookup_pos[inside]]
-            == projected_flat[inside]
-        )
+        matched[inside] = sparse_indices[lookup_pos[inside]] == projected_flat[inside]
 
         valid_idx = np.where(valid)[0]
 
         matched_idx = valid_idx[matched]
 
-        dino_feats[matched_idx] = (
-            sparse_features[
-                lookup_pos[matched]
-            ]
-        )
+        dino_feats[matched_idx] = sparse_features[lookup_pos[matched]]
 
         return dino_feats.astype(np.float32)
-
 
     def _filter_samples_with_allowlist(self, samples):
         allow, allow_path = self._load_sample_allowlist()
@@ -869,11 +826,9 @@ class AgcoBBoxDinoV1(Dataset):
         # files (which are valid-only).
         valid_mask = np.any(pts != 0, axis=1)
         pts = pts[valid_mask]
-        
+
         if self.use_color:
-            color_path = os.path.join(
-                abs_root, sensor, "color", f"{ts}.npy"
-            )
+            color_path = os.path.join(abs_root, sensor, "color", f"{ts}.npy")
             rgb = np.load(color_path).astype(np.float32)
             if rgb.ndim != 2 or rgb.shape != (pts.shape[0], 3):
                 raise ValueError(
@@ -881,7 +836,7 @@ class AgcoBBoxDinoV1(Dataset):
                     f"expected ({pts.shape[0]}, 3)"
                 )
             pts = np.concatenate([pts, rgb], axis=1)
-            
+
         if self.use_intensity:
             intensity_path = os.path.join(
                 abs_root, sensor, "pointcloud_raw", "intensity", f"{ts}.npy"
@@ -898,12 +853,12 @@ class AgcoBBoxDinoV1(Dataset):
         return pts
 
     def _load_dino(self, abs_root, frame_timestamp):
-        dino_path = os.path.join(abs_root, self.dino_camera, self.dino_subdir, f"{frame_timestamp}.npz") 
+        dino_path = os.path.join(
+            abs_root, self.dino_camera, self.dino_subdir, f"{frame_timestamp}.npz"
+        )
         dino_patch_feat = np.load(dino_path, allow_pickle=True)
-        
-        return dino_patch_feat 
 
-
+        return dino_patch_feat
 
     def _count_kept_boxes(self, abs_root, sensor, ts):
         path = os.path.join(abs_root, sensor, "annotations", f"{ts}.json")
@@ -947,7 +902,9 @@ class AgcoBBoxDinoV1(Dataset):
 
         # Remap disk labels to model class indices; drop background (disk 0),
         # any unrecognised labels, and any classes not in `included_classes`.
-        filtered = [b for b in filtered if int(b.get("label", -1)) in self.disk_label_to_class]
+        filtered = [
+            b for b in filtered if int(b.get("label", -1)) in self.disk_label_to_class
+        ]
 
         n = len(filtered)
         centers = np.zeros((n, 3), dtype=np.float64)
@@ -969,9 +926,7 @@ class AgcoBBoxDinoV1(Dataset):
         point_cloud = self._load_scan(abs_root, sensor, ts)
         segment = None
         if self.load_segment:
-            seg_path = os.path.join(
-                abs_root, sensor, self.segment_subdir, f"{ts}.npy"
-            )
+            seg_path = os.path.join(abs_root, sensor, self.segment_subdir, f"{ts}.npy")
             if not os.path.exists(seg_path):
                 raise FileNotFoundError(
                     f"AgcoBBoxV1.load_segment=True but segment file is missing: "
@@ -991,16 +946,12 @@ class AgcoBBoxDinoV1(Dataset):
         )
         projected_dino = None
         if self.use_dino:
-            frame_timestamp = self.lookup_tables[abs_root][sensor, ts] 
+            frame_timestamp = self.lookup_tables[abs_root][sensor, ts]
             dino_patch_feat = self._load_dino(abs_root, frame_timestamp)
             sparse_dino = dino_patch_feat["features"].item()
-
-            projected_dino = self._project_dino_features(point_cloud[:,:3], sparse_dino, sensor, ridx)
-            
-            # self.debug_visualize_projected_dino(point_cloud[:,:3], sparse_dino, sensor, ridx)
-        
-
-        
+            projected_dino = self._project_dino_features(
+                point_cloud[:, :3], sparse_dino, sensor, ridx
+            )
 
         # --- Points: sensor → RTK frame (T_rtk, points only) ---
         if self.apply_t_rtk:
@@ -1027,9 +978,7 @@ class AgcoBBoxDinoV1(Dataset):
             # scene stays in its original horizontal orientation.
             _angles = Rot.from_matrix(R_global_mat[:3, :3]).as_euler("ZYX")
             R_global = Rot.from_euler("ZYX", [0.0, _angles[1], _angles[2]])
-            point_cloud[:, 0:3] = R_global.apply(point_cloud[:, 0:3]).astype(
-                np.float32
-            )
+            point_cloud[:, 0:3] = R_global.apply(point_cloud[:, 0:3]).astype(np.float32)
 
         # --- Points: global → levelled frame (R_level) ---
         if self.apply_r_level_to_points:
@@ -1076,7 +1025,7 @@ class AgcoBBoxDinoV1(Dataset):
         }
         if segment is not None:
             data_dict["segment"] = segment
-        if projected_dino is not None: 
+        if projected_dino is not None:
             data_dict["dino_feat"] = projected_dino
         data_dict = self.transform(data_dict)
         point_cloud = data_dict["point_cloud"]
@@ -1092,9 +1041,13 @@ class AgcoBBoxDinoV1(Dataset):
             if self.deterministic_debug:
                 rng = np.random.default_rng(self.deterministic_seed + int(idx))
                 if point_cloud.shape[0] >= self.num_points:
-                    choices = rng.choice(point_cloud.shape[0], self.num_points, replace=False)
+                    choices = rng.choice(
+                        point_cloud.shape[0], self.num_points, replace=False
+                    )
                 else:
-                    choices = rng.choice(point_cloud.shape[0], self.num_points, replace=True)
+                    choices = rng.choice(
+                        point_cloud.shape[0], self.num_points, replace=True
+                    )
                 point_cloud = point_cloud[choices]
             else:
                 point_cloud, choices = _random_sampling(point_cloud, self.num_points)
@@ -1113,7 +1066,10 @@ class AgcoBBoxDinoV1(Dataset):
                 )
             if n_pad > 0:
                 point_cloud = np.concatenate(
-                    [point_cloud, np.zeros((point_cloud.shape[0], n_pad), dtype=np.float32)],
+                    [
+                        point_cloud,
+                        np.zeros((point_cloud.shape[0], n_pad), dtype=np.float32),
+                    ],
                     axis=1,
                 )
 
@@ -1152,27 +1108,35 @@ class AgcoBBoxDinoV1(Dataset):
             point_cloud_dims_max = point_cloud[:, :3].max(axis=0).astype(np.float32)
         mult_factor = point_cloud_dims_max - point_cloud_dims_min
 
-        box_centers_normalized = _shift_scale_points(
-            gt_centers[np.newaxis, ...],
-            src_range=[
-                point_cloud_dims_min[np.newaxis, ...],
-                point_cloud_dims_max[np.newaxis, ...],
-            ],
-            dst_range=self.center_normalizing_range,
-        ).squeeze(0).astype(np.float32)
+        box_centers_normalized = (
+            _shift_scale_points(
+                gt_centers[np.newaxis, ...],
+                src_range=[
+                    point_cloud_dims_min[np.newaxis, ...],
+                    point_cloud_dims_max[np.newaxis, ...],
+                ],
+                dst_range=self.center_normalizing_range,
+            )
+            .squeeze(0)
+            .astype(np.float32)
+        )
         box_centers_normalized = box_centers_normalized * gt_present[..., np.newaxis]
 
-        box_sizes_normalized = (
-            gt_sizes / (mult_factor[np.newaxis, :] + 1e-6)
-        ).astype(np.float32)
+        box_sizes_normalized = (gt_sizes / (mult_factor[np.newaxis, :] + 1e-6)).astype(
+            np.float32
+        )
 
         # GT corners (rotated, using yaw).
         centers_upright = _flip_axis_to_camera_np(gt_centers[np.newaxis, ...])
-        box_corners = _get_3d_box_batch_np(
-            gt_sizes[np.newaxis, ...],
-            gt_angles[np.newaxis, ...],
-            centers_upright,
-        ).squeeze(0).astype(np.float32)
+        box_corners = (
+            _get_3d_box_batch_np(
+                gt_sizes[np.newaxis, ...],
+                gt_angles[np.newaxis, ...],
+                centers_upright,
+            )
+            .squeeze(0)
+            .astype(np.float32)
+        )
 
         roundtrip_diag = {
             "enabled": bool(self.debug_roundtrip_check),
@@ -1181,7 +1145,9 @@ class AgcoBBoxDinoV1(Dataset):
             "center_l2_max": float("nan"),
         }
         if self.debug_roundtrip_check and num_gt > 0:
-            centers_cam = _flip_axis_to_camera_np(gt_centers[:num_gt][np.newaxis, ...]).squeeze(0)
+            centers_cam = _flip_axis_to_camera_np(
+                gt_centers[:num_gt][np.newaxis, ...]
+            ).squeeze(0)
             centers_back = np.empty_like(centers_cam)
             centers_back[:, 0] = centers_cam[:, 0]
             centers_back[:, 1] = centers_cam[:, 2]
@@ -1221,184 +1187,10 @@ class AgcoBBoxDinoV1(Dataset):
         if segment is not None:
             out["segment"] = segment.astype(np.int64)
         if projected_dino is not None:
-            assert len(projected_dino) == len(point_cloud), f"projected dino with length {len(projected_dino)} is not equal to point cloud length of {len(point_cloud)}"
-            # print(f"projected dino shape {projected_dino.shape}")
-
+            assert len(projected_dino) == len(point_cloud), (
+                f"projected dino with length {len(projected_dino)} is not equal "
+                f"to point cloud length of {len(point_cloud)}"
+            )
             out["dino_feat"] = projected_dino
 
         return out
-    
-    def debug_visualize_projected_dino(
-        self,
-        point_cloud,
-        sparse_dino,
-        sensor,
-        ridx,
-    ):
-        """
-        Visualize projected DINO features as PCA colors on the point cloud.
-
-        Parameters
-        ----------
-        point_cloud : (N, C)
-            Point cloud. XYZ must be in [:, :3].
-
-        sparse_dino : dict
-            sparse_dino["flat_indices"]
-            sparse_dino["patch_features"]
-            sparse_dino["grid_shape"]
-
-        sensor : str
-            LiDAR sensor name.
-
-        ridx : int
-            Root index.
-        """
-
-        import open3d as o3d
-        from sklearn.decomposition import PCA
-
-        pts_xyz = point_cloud[:, :3]
-
-        sparse_indices = sparse_dino["flat_indices"]
-        sparse_features = sparse_dino["patch_features"]
-
-        Ht, Wt = map(
-            int,
-            sparse_dino["grid_shape"],
-        )
-
-        patch_size = 16
-
-        intr = self.camera_intrinsics[ridx]
-
-        f = intr["f"]
-        cx = intr["cx"]
-        cy = intr["cy"]
-        k = intr["k"]
-
-        f_patch = f / patch_size
-        cx_patch = cx / patch_size
-        cy_patch = cy / patch_size
-
-        t_rtk = self._t_rtk_map[(ridx, sensor)]
-
-        if t_rtk is None:
-            print("No T_rtk calibration")
-            return
-
-        t_rot, t_trans = t_rtk
-
-        T_rtk_sensor = np.eye(4)
-
-        T_rtk_sensor[:3, :3] = t_rot.as_matrix()
-        T_rtk_sensor[:3, 3] = t_trans
-
-        T_cam_sensor = (
-            np.linalg.inv(self._t_rtk_cam[ridx])
-            @ T_rtk_sensor
-        )
-
-        # ------------------------------------------------------------
-        # Sensor -> camera
-        # ------------------------------------------------------------
-
-        pts_cam = (
-            pts_xyz @ T_cam_sensor[:3, :3].T
-            + T_cam_sensor[:3, 3]
-        )
-
-        # ------------------------------------------------------------
-        # Project
-        # ------------------------------------------------------------
-
-        uv_patch, valid = project_fisheye_simple_radial(
-            pts_cam,
-            f=f_patch,
-            cx=cx_patch,
-            cy=cy_patch,
-            k=k,
-            img_w=Wt,
-            img_h=Ht,
-        )
-
-        if not np.any(valid):
-            print("No valid projected points")
-            return
-
-        px = uv_patch[valid, 0].astype(np.int32)
-        py = uv_patch[valid, 1].astype(np.int32)
-
-        projected_flat = py * Wt + px
-
-        # ------------------------------------------------------------
-        # Sparse lookup
-        # ------------------------------------------------------------
-
-        lookup_pos = np.searchsorted(
-            sparse_indices,
-            projected_flat,
-        )
-
-        inside = lookup_pos < len(sparse_indices)
-
-        matched = np.zeros_like(inside)
-
-        matched[inside] = (
-            sparse_indices[lookup_pos[inside]]
-            == projected_flat[inside]
-        )
-
-        valid_idx = np.where(valid)[0]
-
-        matched_idx = valid_idx[matched]
-
-        if len(matched_idx) == 0:
-            print("No sparse DINO matches")
-            return
-
-        # ------------------------------------------------------------
-        # Gather matched features
-        # ------------------------------------------------------------
-
-        point_features = sparse_features[
-            lookup_pos[matched]
-        ].astype(np.float32)
-
-        # ------------------------------------------------------------
-        # PCA -> RGB
-        # ------------------------------------------------------------
-
-        pca = PCA(n_components=3)
-
-        colors = pca.fit_transform(point_features)
-
-        colors -= colors.min(axis=0, keepdims=True)
-
-        colors /= (
-            colors.max(axis=0, keepdims=True)
-            + 1e-8
-        )
-
-        # ------------------------------------------------------------
-        # Build Open3D cloud
-        # ------------------------------------------------------------
-
-        pcd = o3d.geometry.PointCloud()
-
-        pcd.points = o3d.utility.Vector3dVector(
-            pts_xyz[matched_idx]
-        )
-
-        pcd.colors = o3d.utility.Vector3dVector(
-            colors
-        )
-
-        # ------------------------------------------------------------
-        # Visualize
-        # ------------------------------------------------------------
-
-        o3d.visualization.draw_geometries(
-            [pcd],
-            window_name="Projected DINO PCA",
-        )

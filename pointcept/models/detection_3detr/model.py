@@ -90,7 +90,9 @@ def point2dense(point):
     device = point.coord.device
     # Per-point position within its scene.
     offsets_shifted = torch.cat([counts.new_zeros(1), point.offset[:-1]])
-    pos_in_scene = torch.arange(point.coord.shape[0], device=device) - offsets_shifted[point.batch]
+    pos_in_scene = (
+        torch.arange(point.coord.shape[0], device=device) - offsets_shifted[point.batch]
+    )
 
     # Build (B, max_n, *) dense tensors via index_put (differentiable).
     xyz_out = point.coord.new_zeros(B, max_n, 3)
@@ -99,9 +101,8 @@ def point2dense(point):
     feat_out[point.batch, pos_in_scene] = point.feat
 
     # True = padded (ignored in attention)
-    padding_mask = (
-        torch.arange(max_n, device=device).unsqueeze(0)
-        >= counts.unsqueeze(1)
+    padding_mask = torch.arange(max_n, device=device).unsqueeze(0) >= counts.unsqueeze(
+        1
     )
 
     feat_out = feat_out.permute(0, 2, 1).contiguous()
@@ -324,6 +325,11 @@ class Model3DETRDetector(nn.Module):
         features = pc[..., 3:].transpose(1, 2).contiguous() if pc.size(-1) > 3 else None
         return xyz, features
 
+    def _run_pre_encoder(self, xyz, features):
+        # Hook for subclasses to inject side-channel state (e.g. cached
+        # pre-encoder results) without duplicating run_encoder.
+        return self.pre_encoder(xyz, features)
+
     def run_encoder(self, point_clouds):
         """Run pre-encoder + encoder, returning dense tensors and padding mask.
 
@@ -337,7 +343,7 @@ class Model3DETRDetector(nn.Module):
         padding_mask = None
 
         if self.pre_encoder is not None:
-            result = self.pre_encoder(xyz, features)
+            result = self._run_pre_encoder(xyz, features)
             if isinstance(result, Point):
                 # Point-returning pre-encoder (e.g. a PTv3-based component)
                 pre_enc_xyz, pre_enc_features, padding_mask = point2dense(result)
@@ -362,7 +368,9 @@ class Model3DETRDetector(nn.Module):
             # Project to encoder_dim and convert to (N, B, C)
             pre_enc_features = self.input_projection(inp).permute(1, 0, 2)
 
-        result = self.encoder(pre_enc_features, xyz=pre_enc_xyz, padding_mask=padding_mask)
+        result = self.encoder(
+            pre_enc_features, xyz=pre_enc_xyz, padding_mask=padding_mask
+        )
         if isinstance(result, Point):
             # Point-returning encoder (e.g. a PTv3-based encoder component)
             enc_xyz, enc_features_dense, padding_mask = point2dense(result)
@@ -514,9 +522,7 @@ class Model3DETRDetector(nn.Module):
         """
         point_clouds = input_dict["point_clouds"]
 
-        enc_xyz, enc_features, enc_inds, padding_mask = self.run_encoder(
-            point_clouds
-        )
+        enc_xyz, enc_features, enc_inds, padding_mask = self.run_encoder(point_clouds)
         # enc_features: (N', B, C) → (B, C, N') for projection
         enc_features = self.encoder_to_decoder_projection(enc_features.permute(1, 2, 0))
         enc_features = enc_features.permute(2, 0, 1)

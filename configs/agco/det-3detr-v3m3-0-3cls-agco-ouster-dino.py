@@ -1,9 +1,10 @@
 """
-3DETR on AGCO — v1m3-0-3cls-ouster-dino: Ouster + projected DINO patch features.
+3DETR on AGCO — v3m3-0-3cls-ouster-dino: Ouster + projected DINO patch features.
 
 Architecture:
-  PointnetSAPreEncoder(2048 pts) + VanillaTransformerEncoder3DETR(256d, 3L)
-  + TransformerDecoder3DETR(256d, 8L). num_queries=32,
+  PTv3PreEncoderWithDino (grid_size=0.05, FPS 2048 pts)
+  + DinoInjectionEncoder wrapping VanillaTransformerEncoder3DETR(512d, 3L)
+  + TransformerDecoder3DETR(512d, 8L). num_queries=32,
   center_offset_normalized=True, max_num_obj=16.
 
 Dataset:
@@ -17,7 +18,7 @@ Criterion (SUN-like):
   loss_angle_cls=0.1, loss_angle_reg=0.5. giou_on_aux_outputs=False.
 
 Usage:
-  sh scripts/train.sh -d agco -c det-3detr-v1m3-0-3cls-agco-ouster-dino -n v1m3_ouster_dino -g 2
+  sh scripts/train.sh -d agco -c det-3detr-v3m3-0-3cls-agco-ouster-dino -n v3m3_ouster_dino -g 2
 """
 
 _base_ = ["../_base_/default_runtime.py"]
@@ -47,14 +48,14 @@ dino_dir = "dino_patch_h16plus_full_res"
 model = dict(
     type="Model3DETRDetectorWithDino",
     pre_encoder=dict(
-        type="PTv3PreEncoderWithDino",        
+        type="PTv3PreEncoderWithDino",
         grid_size=0.05,
         enc_mode=True,
         npoint=2048,
         in_channels=3,
     ),
     encoder=dict(
-        type="DinoInjectionEncoder",     
+        type="DinoInjectionEncoder",
         inner_encoder=dict(
             type="VanillaTransformerEncoder3DETR",
             encoder_dim=512,
@@ -65,7 +66,7 @@ model = dict(
             activation="relu",
         ),
         dino_dim=dino_feature_dim,
-        encoder_dim=512, 
+        encoder_dim=512,
     ),
     decoder=dict(
         type="TransformerDecoder3DETR",
@@ -134,9 +135,7 @@ dataset_type = "AgcoBBoxDinoV1"
 
 data_root = "/media/ai/T7/agco2026"
 
-meta_data_dir = (
-    "/media/ai/T7/agco2026/meta_data"
-)
+meta_data_dir = "/media/ai/T7/agco2026/meta_data"
 
 sensors = ["ouster"]
 
@@ -219,12 +218,10 @@ common_dataset_kwargs = dict(
     apply_r_level_to_points=True,
     require_gravity_align=True,
     residual_rpy_warn_deg=10.0,
-
     # DINO
     use_dino=True,
     dino_camera=dino_camera,
     dino_subdir=dino_dir,
-    dino_feature_dim=dino_feature_dim,
 )
 
 data = dict(
@@ -250,7 +247,6 @@ data = dict(
         ],
         **common_dataset_kwargs,
     ),
-
     val=dict(
         type=dataset_type,
         split="val",
@@ -264,7 +260,6 @@ data = dict(
         ],
         **common_dataset_kwargs,
     ),
-
     test=dict(
         type=dataset_type,
         split="test",

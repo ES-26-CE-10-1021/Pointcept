@@ -32,18 +32,13 @@ import torch
 import torch.nn as nn
 
 from pointcept.models.builder import MODELS, MODULES
-from pointcept.models.utils.structure import Point
-
-from .model import (
-    Model3DETRDetector,
-    point2dense,
-)
+from .model import Model3DETRDetector
 from .ptv3 import PTv3DinoMixin
-
 
 # ---------------------------------------------------------------------------
 # Wrapping encoder
 # ---------------------------------------------------------------------------
+
 
 @MODULES.register_module("DinoInjectionEncoder")
 class DinoInjectionEncoder(nn.Module):
@@ -100,7 +95,7 @@ class DinoInjectionEncoder(nn.Module):
             (enc_xyz, enc_features, enc_inds).
         """
         dino_pooled = self._dino_pooled
-        self._dino_pooled = None            # clear immediately — don't leak
+        self._dino_pooled = None  # clear immediately — don't leak
 
         if dino_pooled is not None:
             # dino_pooled: (B, N', D) → project → (B, N', C)
@@ -116,6 +111,7 @@ class DinoInjectionEncoder(nn.Module):
 # ---------------------------------------------------------------------------
 # Model
 # ---------------------------------------------------------------------------
+
 
 @MODELS.register_module()
 class Model3DETRDetectorWithDino(Model3DETRDetector):
@@ -158,11 +154,19 @@ class Model3DETRDetectorWithDino(Model3DETRDetector):
                 f"DinoInjectionEncoder, got {type(self.encoder).__name__}."
             )
 
+    def _run_pre_encoder(self, xyz, features):
+        # If forward() stashed a precomputed pre-encoder result (via
+        # forward_with_dino), reuse it instead of double-encoding.
+        cached = getattr(self, "_cached_pre_enc", None)
+        if cached is not None:
+            return cached
+        return super()._run_pre_encoder(xyz, features)
+
     def forward(self, input_dict, encoder_only=False):
         """
         Args:
             input_dict (dict): same as Model3DETRDetector, plus optionally:
-                'dino_feat': (B, D, N) float tensor — per-point DINO features
+                'dino_feat': (B, N, D) float tensor — per-point DINO features
                 at input resolution, aligned with input_dict['point_clouds'].
                 If absent the model behaves identically to the base detector
                 (dino_proj produces zeros due to zero_init, or is skipped).
@@ -170,118 +174,29 @@ class Model3DETRDetectorWithDino(Model3DETRDetector):
         Returns:
             Same as Model3DETRDetector.forward.
         """
-        point_clouds = input_dict["point_clouds"]
-        dino_feat = input_dict.get("dino_feat", None)   # (B, D, N) or None
-
-        # ---- Run pre_encoder with dino passthrough ----
-        xyz = point_clouds[..., :3].contiguous()
-        features = (
-            point_clouds[..., 3:].transpose(1, 2).contiguous()
-            if point_clouds.size(-1) > 3 else None
-        )
+        dino_feat = input_dict.get("dino_feat", None)
 
         if dino_feat is not None:
-            # pre_enc_result, dino_pooled = self.pre_encoder.forward_with_dino(
-            #     xyz, features, dino_feat
-            # )
-            result = self.pre_encoder.forward_with_dino(
-                xyz,
-                features,
-                dino_feat
+            point_clouds = input_dict["point_clouds"]
+            xyz = point_clouds[..., :3].contiguous()
+            features = (
+                point_clouds[..., 3:].transpose(1, 2).contiguous()
+                if point_clouds.size(-1) > 3
+                else None
             )
+            result = self.pre_encoder.forward_with_dino(xyz, features, dino_feat)
 
             if getattr(self.pre_encoder, "npoint", None) is not None:
-                # FPS path
                 enc_xyz, enc_features, enc_inds, dino_pooled = result
-
-                # cache full tuple for run_encoder()
-                pre_enc_result = (enc_xyz, enc_features, enc_inds)
-
-                # convert (B, D, N) -> (B, N, D)
+                self._cached_pre_enc = (enc_xyz, enc_features, enc_inds)
+                # FPS path emits (B, D, npoint); DinoInjectionEncoder wants (B, N', D).
                 dino_pooled = dino_pooled.permute(0, 2, 1).contiguous()
-
             else:
-                # no-FPS path
-                pre_enc_result, dino_pooled = result
-            # dino_pooled layout depends on pre_encoder.npoint:
-            #   npoint is None → (B, N_enc, D)   already (B, N', D)
-            #   npoint is set  → (B, D, npoint)  needs transpose
-            # if dino_pooled is not None and dino_pooled.shape[1] != dino_pooled.shape[2]:
-            #     # Distinguish (B, N', D) from (B, D, npoint) by checking
-            #     # whether the pre_encoder has npoint set.
-            #     if getattr(self.pre_encoder, "npoint", None) is not None:
-            #         dino_pooled = dino_pooled.permute(0, 2, 1)  # → (B, N', D)
-            # Stash for DinoInjectionEncoder to consume in run_encoder.
+                point, dino_pooled = result
+                self._cached_pre_enc = point
             self.encoder._dino_pooled = dino_pooled
-        else:
-            # No dino_feat: pre_encoder runs its normal forward.
-            # DinoInjectionEncoder._dino_pooled stays None → no injection.
-            pass
 
-        # ---- run_encoder calls self.pre_encoder(xyz, features) again ----
-        # Problem: we already ran forward_with_dino above, and run_encoder
-        # will call self.pre_encoder(xyz, features) a second time — double
-        # encode.  We avoid this by temporarily replacing self.pre_encoder
-        # with a thin wrapper that returns the already-computed result.
-        if dino_feat is not None:
-            _orig_pre_encoder = self.pre_encoder
-            _cached_result = pre_enc_result
-
-            class _CachedPreEncoder(nn.Module):
-                def __init__(self, cached_result):
-                    super().__init__()
-                    self.cached_result = cached_result
-
-                def forward(self, xyz_, features_):
-                    return self.cached_result
-
-                __call__ = forward
-            self.pre_encoder = _CachedPreEncoder(_cached_result)
-            try:
-                enc_xyz, enc_features, enc_inds, padding_mask = self.run_encoder(
-                    point_clouds
-                )
-            finally:
-                self.pre_encoder = _orig_pre_encoder
-        else:
-            enc_xyz, enc_features, enc_inds, padding_mask = self.run_encoder(
-                point_clouds
-            )
-
-        # ---- Everything below is identical to Model3DETRDetector.forward ----
-        enc_features = self.encoder_to_decoder_projection(
-            enc_features.permute(1, 2, 0)
-        ).permute(2, 0, 1)
-
-        if encoder_only:
-            return enc_xyz, enc_features.transpose(0, 1)
-
-        point_cloud_dims = [
-            input_dict["point_cloud_dims_min"],
-            input_dict["point_cloud_dims_max"],
-        ]
-        query_xyz, query_embed = self.get_query_embeddings(
-            enc_xyz, point_cloud_dims, padding_mask=padding_mask
-        )
-        enc_pos = self.pos_embedding(enc_xyz, input_range=point_cloud_dims)
-
-        enc_pos = enc_pos.permute(2, 0, 1)
-        query_embed = query_embed.permute(2, 0, 1)
-        tgt = torch.zeros_like(query_embed)
-        box_features = self.decoder(
-            tgt,
-            enc_features,
-            query_pos=query_embed,
-            pos=enc_pos,
-            memory_key_padding_mask=padding_mask,
-        )[0]
-
-        box_predictions = self.get_box_predictions(
-            query_xyz, point_cloud_dims, box_features
-        )
-
-        if self.training and self.criterion is not None:
-            loss, _ = self.criterion(box_predictions, input_dict)
-            return dict(loss=loss)
-
-        return box_predictions
+        try:
+            return super().forward(input_dict, encoder_only=encoder_only)
+        finally:
+            self._cached_pre_enc = None
