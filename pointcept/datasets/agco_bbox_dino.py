@@ -1076,11 +1076,12 @@ class AgcoBBoxDinoV1(Dataset):
         }
         if segment is not None:
             data_dict["segment"] = segment
-        if self.use_dino and projected_dino:
-            data_dict["dino_feat"] = projected_dino 
+        if projected_dino is not None: 
+            data_dict["dino_feat"] = projected_dino
         data_dict = self.transform(data_dict)
         point_cloud = data_dict["point_cloud"]
         segment = data_dict.get("segment")  # None when load_segment is False
+        projected_dino = data_dict.get("dino_feat")
         centers_raw = data_dict["gt_box_centers_raw"]
         sizes_raw = data_dict["gt_box_sizes_raw"]
         yaws_raw = data_dict["gt_box_angles_raw"]
@@ -1219,6 +1220,12 @@ class AgcoBBoxDinoV1(Dataset):
         }
         if segment is not None:
             out["segment"] = segment.astype(np.int64)
+        if projected_dino is not None:
+            assert len(projected_dino) == len(point_cloud), f"projected dino with length {len(projected_dino)} is not equal to point cloud length of {len(point_cloud)}"
+            print(f"projected dino shape {projected_dino.shape}")
+
+            out["dino_feat"] = projected_dino
+
         return out
     
     def debug_visualize_projected_dino(

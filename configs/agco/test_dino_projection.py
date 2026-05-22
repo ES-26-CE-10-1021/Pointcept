@@ -23,8 +23,8 @@ Usage:
 _base_ = ["../_base_/default_runtime.py"]
 
 # -- Training -----------------------------------------------------------------
-batch_size = 1
-num_worker = 1
+batch_size = 8
+num_worker = 4
 mix_prob = 0
 enable_amp = False
 find_unused_parameters = False

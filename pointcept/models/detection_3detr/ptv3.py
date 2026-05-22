@@ -71,18 +71,6 @@ _logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # DINO helpers
 # ---------------------------------------------------------------------------
-# def _flatten_dino(xyz, dino_feat):
-#     """Flatten dense (B, D, N) → (B*N, D), matching dense2point's scene order.
-#
-#     Args:
-#         xyz:       (B, N, 3)  — used only for shape
-#         dino_feat: (B, D, N)
-#
-#     Returns:
-#         (B*N, D) contiguous tensor on the same device
-#     """
-#     B, D, N = dino_feat.shape
-#     return dino_feat.permute(0, 2, 1).reshape(B * N, D).contiguous()
 def _flatten_dino(xyz, dino_feat):
     """
     Args:
@@ -92,12 +80,11 @@ def _flatten_dino(xyz, dino_feat):
     Returns:
         (B*N, D)
     """
-
-    B, D, N = dino_feat.shape
+    print("incoming dino", dino_feat.shape)
+    B, N, D = dino_feat.shape
 
     return (
         dino_feat
-        .permute(0, 2, 1)   # (B, N, D)
         .reshape(B * N, D)
         .contiguous()
     )
@@ -296,7 +283,7 @@ class PTv3DinoMixin:
 
         if dino_feat is not None:
             point["dino_feat"] = _flatten_dino(xyz, dino_feat)
-            point["dino_feat"] = point["dino_feat"].transpose(0, 1).contiguous()
+            # point["dino_feat"] = point["dino_feat"].transpose(0, 1).contiguous()
 
         # _orig_sparsify = point.sparsify
         #
