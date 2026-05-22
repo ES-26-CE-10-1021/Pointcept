@@ -33,7 +33,6 @@ import torch.nn as nn
 
 from pointcept.models.builder import MODELS, MODULES
 from .model import Model3DETRDetector
-from .ptv3 import PTv3DinoMixin
 
 # ---------------------------------------------------------------------------
 # Wrapping encoder
@@ -117,8 +116,9 @@ class DinoInjectionEncoder(nn.Module):
 class Model3DETRDetectorWithDino(Model3DETRDetector):
     """3DETR detector with DINO feature injection through the encoder slot.
 
-    The pre_encoder must be a PTv3DinoMixin subclass so that
-    forward_with_dino() is available.  The encoder must be a
+    The pre_encoder must expose ``forward_with_dino(xyz, features, dino_feat)``
+    (e.g. PTv3PreEncoderWithDino, PTv3m3PreEncoderWithDino,
+    PointnetSAPreEncoderWithDino).  The encoder must be a
     DinoInjectionEncoder so that pooled DINO features are added
     before the transformer encoder runs.
 
@@ -134,18 +134,17 @@ class Model3DETRDetectorWithDino(Model3DETRDetector):
 
     Args:
         **kwargs: forwarded verbatim to Model3DETRDetector.__init__().
-            pre_encoder must be a PTv3DinoMixin subclass.
+            pre_encoder must expose forward_with_dino().
             encoder must be a DinoInjectionEncoder.
     """
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
 
-        if not isinstance(self.pre_encoder, PTv3DinoMixin):
+        if not hasattr(self.pre_encoder, "forward_with_dino"):
             raise TypeError(
-                f"Model3DETRDetectorWithDino: pre_encoder must be a "
-                f"PTv3DinoMixin subclass (PTv3PreEncoderWithDino or "
-                f"PTv3m3PreEncoderWithDino), got "
+                f"Model3DETRDetectorWithDino: pre_encoder must expose "
+                f"forward_with_dino(xyz, features, dino_feat), got "
                 f"{type(self.pre_encoder).__name__}."
             )
         if not isinstance(self.encoder, DinoInjectionEncoder):

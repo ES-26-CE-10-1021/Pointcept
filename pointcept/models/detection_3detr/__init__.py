@@ -2,15 +2,22 @@ from .dataset_config import ScanNetDetectionConfig, AgcoBBoxConfig
 from .components import (
     IdentityEncoder3DETR,
     PointnetSAPreEncoder,
+    PointnetSAPreEncoderWithDino,
     VanillaTransformerEncoder3DETR,
     MaskedTransformerEncoder3DETR,
     TransformerDecoder3DETR,
 )
 from .criterion import SetCriterion3DETR
 from .model import Model3DETRDetector, dense2point, point2dense
-from .dino_injection import Model3DETRDetectorWithDino 
+from .dino_injection import Model3DETRDetectorWithDino
+
 try:
-    from .ptv3 import PTv3PreEncoder, PTv3m3PreEncoder, PTv3PreEncoderWithDino, PTv3DinoMixin
+    from .ptv3 import (
+        PTv3PreEncoder,
+        PTv3m3PreEncoder,
+        PTv3PreEncoderWithDino,
+        PTv3DinoMixin,
+    )
 except ImportError:
     PTv3PreEncoder = None
     PTv3m3PreEncoder = None
