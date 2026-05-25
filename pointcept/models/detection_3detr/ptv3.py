@@ -35,7 +35,17 @@ from pointcept.models.point_transformer_v3.point_transformer_v3m1_base import (
 )
 from pointcept.models.point_transformer_v3.point_transformer_v3m3_utonia import (
     PointTransformerV3 as PointTransformerV3m3,
+    GridPooling as GridPoolingM3,
 )
+from pointcept.models.point_transformer_v3.point_transformer_v3m2_sonata import (
+    GridPooling as GridPoolingM2,
+)
+
+# Downsampling modules that expose (pooling_parent, pooling_inverse) on their
+# output Point. The DINO-propagation hook (PTv3DinoMixin._register_pooling_hooks)
+# attaches to every instance found in self.enc to keep dino_feat aligned with
+# point.feat across each downsample.
+_DINO_POOLING_TYPES = (SerializedPooling, GridPoolingM3, GridPoolingM2)
 from pointcept.models.detection_3detr.model import dense2point, point2dense
 from pointcept.models.utils.misc import offset2bincount
 from third_party.pointnet2.pointnet2_utils import furthest_point_sample
@@ -213,7 +223,7 @@ class PTv3DinoMixin:
             return hook
 
         for _, module in self.enc.named_modules():
-            if isinstance(module, SerializedPooling):
+            if isinstance(module, _DINO_POOLING_TYPES):
                 self._pooling_hooks.append(module.register_forward_hook(_make_hook()))
 
     @staticmethod
