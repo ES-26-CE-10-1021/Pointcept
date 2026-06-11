@@ -139,11 +139,14 @@ class SemSegEvaluator(HookBase):
             output = output_dict["seg_logits"]
             loss = output_dict["loss"]
             pred = output.max(1)[1]
-            segment = input_dict["segment"]
+            # Flatten segment so this hook handles both Pointcept's standard
+            # flat (N,) layout and dense (B, N) layouts (e.g. AgcoBBoxV1 +
+            # Dense3DETRSegmentor). No-op when segment is already 1D.
+            segment = input_dict["segment"].reshape(-1)
             if "inverse" in input_dict.keys():
                 assert "origin_segment" in input_dict.keys()
                 pred = pred[input_dict["inverse"]]
-                segment = input_dict["origin_segment"]
+                segment = input_dict["origin_segment"].reshape(-1)
             intersection, union, target = intersection_and_union_gpu(
                 pred,
                 segment,
@@ -215,24 +218,24 @@ class SemSegEvaluator(HookBase):
                     },
                     step=wandb.run.step,
                 )
-            if self.write_cls_iou:
+            names = self.trainer.cfg.data.names
+            for i in range(self.trainer.cfg.data.num_classes):
+                self.trainer.writer.add_scalar(
+                    f"val_finegrained/IoU_{names[i]}",
+                    float(iou_class[i]),
+                    current_epoch,
+                )
+                self.trainer.writer.add_scalar(
+                    f"val_finegrained/OA_{names[i]}",
+                    float(acc_class[i]),
+                    current_epoch,
+                )
+            if self.trainer.cfg.enable_wandb:
+                wandb_fg = {"Epoch": current_epoch}
                 for i in range(self.trainer.cfg.data.num_classes):
-                    self.trainer.writer.add_scalar(
-                        f"val/cls_{i}-{self.trainer.cfg.data.names[i]} IoU",
-                        iou_class[i],
-                        current_epoch,
-                    )
-                if self.trainer.cfg.enable_wandb:
-                    for i in range(self.trainer.cfg.data.num_classes):
-                        wandb.log(
-                            {
-                                "Epoch": current_epoch,
-                                f"val/cls_{i}-{self.trainer.cfg.data.names[i]} IoU": iou_class[
-                                    i
-                                ],
-                            },
-                            step=wandb.run.step,
-                        )
+                    wandb_fg[f"val_finegrained/IoU_{names[i]}"] = float(iou_class[i])
+                    wandb_fg[f"val_finegrained/OA_{names[i]}"] = float(acc_class[i])
+                wandb.log(wandb_fg, step=wandb.run.step)
         self.trainer.logger.info("<<<<<<<<<<<<<<<<< End Evaluation <<<<<<<<<<<<<<<<<")
         self.trainer.comm_info["current_metric_value"] = m_iou  # save for saver
         self.trainer.comm_info["current_metric_name"] = "mIoU"  # save for saver
@@ -907,7 +910,18 @@ class ObjDetEvaluator(HookBase):
     Config must set:
         num_semcls (int): number of detection classes (default 18)
         class_names (list[str]): ordered class name list
+
+    Args:
+        compute_loss (bool): If True (default, backward-compatible), runs the
+            model twice per val batch — once with ``training=True`` to compute
+            the validation loss and once with ``training=False`` to obtain
+            outputs for AP. If False, runs only the eval forward and reports
+            ``val/loss`` as NaN. Set False to reduce peak val memory for
+            configs with heavy per-sample inputs (e.g. DINO features).
     """
+
+    def __init__(self, compute_loss=True):
+        self.compute_loss = compute_loss
 
     def after_epoch(self):
         if self.trainer.cfg.evaluate:
@@ -949,20 +963,31 @@ class ObjDetEvaluator(HookBase):
 
         total_loss = 0.0
         num_batches = 0
+        # Top-level model gates loss return on `self.training`. Put everything
+        # in eval() (freezing BN running stats + disabling dropout) and toggle
+        # only the outer training flag (no recursion) to access the loss path
+        # without polluting BN stats during validation.
+        self.trainer.model.eval()
+        inner_model = (
+            self.trainer.model.module
+            if hasattr(self.trainer.model, "module")
+            else self.trainer.model
+        )
         for i, input_dict in enumerate(self.trainer.val_loader):
             for key in input_dict.keys():
                 if isinstance(input_dict[key], torch.Tensor):
                     input_dict[key] = input_dict[key].cuda(non_blocking=True)
 
             with torch.no_grad():
-                self.trainer.model.train()
-                loss_out = self.trainer.model(input_dict)
-                self.trainer.model.eval()
+                if self.compute_loss:
+                    inner_model.training = True
+                    loss_out = self.trainer.model(input_dict)
+                    inner_model.training = False
+                    if "loss" in loss_out:
+                        total_loss += loss_out["loss"].item()
+                        num_batches += 1
+                    del loss_out
                 output_dict = self.trainer.model(input_dict)
-
-            if "loss" in loss_out:
-                total_loss += loss_out["loss"].item()
-                num_batches += 1
 
             ap_calculator.step_meter(output_dict, input_dict)
 
@@ -973,7 +998,7 @@ class ObjDetEvaluator(HookBase):
                     )
                 )
 
-        loss_avg = total_loss / max(num_batches, 1)
+        loss_avg = total_loss / num_batches if num_batches > 0 else float("nan")
 
         comm.synchronize()
         all_pred = comm.gather(ap_calculator.pred_map_cls, dst=0)
@@ -1130,16 +1155,24 @@ class CombinedSegDetEvaluator(HookBase):
 
         total_loss = 0.0
         num_batches = 0
+        # See ObjDetEvaluator: freeze BN/dropout via eval() and toggle only
+        # the outer training flag to access the loss path without mutating
+        # BN running stats during validation.
+        self.trainer.model.eval()
+        inner_model = (
+            self.trainer.model.module
+            if hasattr(self.trainer.model, "module")
+            else self.trainer.model
+        )
         for i, input_dict in enumerate(self.trainer.val_loader):
             for key in input_dict.keys():
                 if isinstance(input_dict[key], torch.Tensor):
                     input_dict[key] = input_dict[key].cuda(non_blocking=True)
 
             with torch.no_grad():
-                # Loss requires train mode (criterion runs only when training).
-                self.trainer.model.train()
+                inner_model.training = True
                 loss_out = self.trainer.model(input_dict)
-                self.trainer.model.eval()
+                inner_model.training = False
                 output_dict = self.trainer.model(input_dict)
 
             if "loss" in loss_out:

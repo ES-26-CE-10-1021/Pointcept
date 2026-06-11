@@ -95,6 +95,7 @@ fi
 
 echo "Loading config in:" $CONFIG_DIR
 export PYTHONPATH=./$CODE_DIR
+#export PYTHONPATH="${ROOT_DIR}/${CODE_DIR}:${ROOT_DIR}/${CODE_DIR}/third_party/3detr:${PYTHONPATH}"
 echo "Running code in: $CODE_DIR"
 
 

@@ -26,17 +26,311 @@ use and never updated during training.
 import logging
 
 import torch
+import torch_cluster
+import torch_scatter
 from pointcept.models.builder import MODELS, MODULES
 from pointcept.models.point_transformer_v3.point_transformer_v3m1_base import (
     PointTransformerV3,
+    SerializedPooling,
 )
 from pointcept.models.point_transformer_v3.point_transformer_v3m3_utonia import (
     PointTransformerV3 as PointTransformerV3m3,
+    GridPooling as GridPoolingM3,
 )
+from pointcept.models.point_transformer_v3.point_transformer_v3m2_sonata import (
+    GridPooling as GridPoolingM2,
+)
+
+# Downsampling modules that expose (pooling_parent, pooling_inverse) on their
+# output Point. The DINO-propagation hook (PTv3DinoMixin._register_pooling_hooks)
+# attaches to every instance found in self.enc to keep dino_feat aligned with
+# point.feat across each downsample.
+_DINO_POOLING_TYPES = (SerializedPooling, GridPoolingM3, GridPoolingM2)
 from pointcept.models.detection_3detr.model import dense2point, point2dense
+from pointcept.models.utils.misc import offset2bincount
 from third_party.pointnet2.pointnet2_utils import furthest_point_sample
 
 _logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# DINO helpers
+# ---------------------------------------------------------------------------
+def _flatten_dino(dino_feat):
+    """
+    Args:
+        dino_feat: (B, N, D)
+
+    Returns:
+        (B*N, D)
+    """
+    B, N, D = dino_feat.shape
+    return dino_feat.reshape(B * N, D).contiguous()
+
+
+def _pack_voxel_keys(keys, sparse_shape):
+    """Encode (batch, gx, gy, gz) rows as unique int64 scalars.
+
+    Uses the spatial strides implied by sparse_shape so that every valid
+    (batch, gx, gy, gz) combination maps to a distinct integer with no
+    collision.  Values stay well within int64 range for any realistic
+    sparse_shape (grid coords are bounded by sparse_shape which is at
+    most a few thousand in each dimension).
+
+    Args:
+        keys:         (N, 4) int32/int64 — columns: [batch, gx, gy, gz]
+        sparse_shape: sequence of 3 ints [X, Y, Z] from point.sparse_shape
+
+    Returns:
+        (N,) int64 packed keys
+    """
+    sx, sy, sz = int(sparse_shape[0]), int(sparse_shape[1]), int(sparse_shape[2])
+    b = keys[:, 0].long()
+    x = keys[:, 1].long()
+    y = keys[:, 2].long()
+    z = keys[:, 3].long()
+    return b * (sx * sy * sz) + x * (sy * sz) + y * sz + z
+
+
+def _raw_to_voxel_cluster(point):
+    """Map each raw point to its voxel row index in sparse_conv_feat.
+
+    Must be called after point.sparsify() so that sparse_conv_feat.indices
+    (the ground-truth voxel key table in spconv's internal order) exists.
+
+    Uses coordinate-based hashing against sparse_conv_feat.indices rather
+    than assuming any particular sort order from spconv or torch.unique.
+
+    Args:
+        point: Point after sparsify(), carrying .batch, .grid_coord,
+               .sparse_shape, .sparse_conv_feat.
+
+    Returns:
+        cluster: (N_raw,) long — cluster[i] = row in sparse_conv_feat
+                 that raw point i belongs to.
+    """
+    sparse_shape = point.sparse_shape  # [X, Y, Z]
+    vox_keys = point.sparse_conv_feat.indices  # (N_vox, 4) int32: [b,x,y,z]
+    raw_keys = torch.cat(
+        [point.batch.unsqueeze(1).int(), point.grid_coord.int()], dim=1
+    )  # (N_raw, 4)
+
+    vox_packed = _pack_voxel_keys(vox_keys, sparse_shape)  # (N_vox,)
+    raw_packed = _pack_voxel_keys(raw_keys, sparse_shape)  # (N_raw,)
+
+    # Sort the (unique) voxel keys so we can map any raw key to its voxel row
+    # in O(log N_vox) via searchsorted. Every raw_packed is guaranteed to exist
+    # in vox_packed (sparsify() put it there), so the searchsorted result is
+    # always an exact match — no bounds check needed.
+    sort_idx = torch.argsort(vox_packed)
+    pos = torch.searchsorted(vox_packed[sort_idx], raw_packed)
+    return sort_idx[pos]  # (N_raw,) in [0, N_vox)
+
+
+def _scatter_to_dense(dino_flat, point, n_max):
+    """Scatter flat (N_total, D) dino features into (B, n_max, D) dense layout.
+
+    Fully vectorised.  Padded positions are zero-filled.
+
+    Args:
+        dino_flat: (N_total, D)
+        point:     encoded Point with .offset (length-B cumulative counts)
+        n_max:     int — padded sequence length (= max scene length in batch)
+
+    Returns:
+        (B, n_max, D)
+    """
+    bincount = offset2bincount(point.offset)  # (B,)
+    B = int(bincount.shape[0])
+    N_total = int(dino_flat.shape[0])
+    D = int(dino_flat.shape[1])
+    device = dino_flat.device
+
+    # scene_idx[i] = which scene raw/enc point i belongs to
+    scene_idx = torch.repeat_interleave(
+        torch.arange(B, device=device), bincount
+    )  # (N_total,)
+
+    # local_idx[i] = position of point i within its scene (0-based)
+    starts = torch.cat(
+        [bincount.new_zeros(1), bincount.cumsum(0)[:-1]]
+    )  # (B,) first global idx per scene
+    local_idx = torch.arange(N_total, device=device) - torch.repeat_interleave(
+        starts, bincount
+    )  # (N_total,) in [0, n_i)
+
+    flat_idx = scene_idx * n_max + local_idx  # (N_total,) into (B*n_max,)
+
+    out = dino_flat.new_zeros(B * n_max, D)
+    out.scatter_(0, flat_idx.unsqueeze(1).expand(-1, D), dino_flat)
+    return out.view(B, n_max, D)
+
+
+# ---------------------------------------------------------------------------
+# Mixin
+# ---------------------------------------------------------------------------
+
+
+class PTv3DinoMixin:
+    """Threads dino_feat through voxelization and encoder pooling.
+
+    Subclasses must implement:
+      _build_point(xyz, features) -> Point
+          Build and serialise the Point up to (but not including) sparsify().
+          grid_coord must exist on return (serialization() computes it).
+      _forward_from_point(point, after_sparsify=None) -> Point
+          Run sparsify() + embedding + enc (+ optional dec). FPS tail omitted.
+          ``after_sparsify(point)`` runs immediately after ``point.sparsify()``
+          and before ``self.embedding(point)`` (even inside any surrounding
+          ``torch.no_grad()`` block).
+
+    Call _register_pooling_hooks() once at the end of __init__.
+
+    Voxelization alignment
+    ----------------------
+    After point.sparsify() runs, sparse_conv_feat.indices contains the
+    (batch, gx, gy, gz) of every voxel in spconv's actual internal order.
+    _raw_to_voxel_cluster() matches each raw point's grid_coord to its
+    voxel row by hashing, avoiding any assumption about spconv's sort order.
+
+    SerializedPooling stages
+    ------------------------
+    A forward hook on each SerializedPooling module mirrors the same
+    scatter_mean onto point.dino_feat using the pooling_inverse cluster
+    map that SerializedPooling writes onto the output Point.  This keeps
+    dino_feat aligned with point.feat through every downsampling stage.
+    """
+
+    def _register_pooling_hooks(self):
+        """Attach a forward hook to every SerializedPooling in self.enc."""
+        self._pooling_hooks = []
+
+        def _make_hook():
+            def hook(module, inputs, output):
+                parent = output.get("pooling_parent")
+                if parent is None or "dino_feat" not in parent:
+                    return
+                inv = output["pooling_inverse"]  # (N_parent,)
+                n_clusters = output["feat"].shape[0]
+                output["dino_feat"] = torch_scatter.scatter(
+                    parent["dino_feat"],
+                    inv[:, None].expand(-1, parent["dino_feat"].shape[1]),
+                    dim=0,
+                    dim_size=n_clusters,
+                    reduce="mean",
+                )  # (N_clusters, D)
+
+            return hook
+
+        for _, module in self.enc.named_modules():
+            if isinstance(module, _DINO_POOLING_TYPES):
+                self._pooling_hooks.append(module.register_forward_hook(_make_hook()))
+
+    @staticmethod
+    def _dino_after_sparsify(point):
+        """Voxel-pool per-point dino_feat onto the spconv voxel grid.
+
+        Runs after ``point.sparsify()`` so ``sparse_conv_feat.indices`` is the
+        ground-truth voxel ordering. No trainable params — safe under no_grad.
+        """
+        if "dino_feat" not in point:
+            return
+        cluster = _raw_to_voxel_cluster(point)
+        n_vox = point.sparse_conv_feat.features.shape[0]
+        point["dino_feat"] = torch_scatter.scatter(
+            point["dino_feat"],
+            cluster,
+            dim=0,
+            dim_size=n_vox,
+            reduce="mean",
+        )
+
+    @staticmethod
+    def _gather_dino_fps(dino_out, point, n_max, fps_inds):
+        """Gather dino at FPS indices → (B, D, npoint)."""
+        dino_dense = _scatter_to_dense(dino_out, point, n_max)  # (B, n_max, D)
+        gathered = torch.gather(
+            dino_dense,
+            1,
+            fps_inds.unsqueeze(-1).expand(-1, -1, dino_dense.shape[-1]),
+        )  # (B, npoint, D)
+        return gathered.permute(0, 2, 1).contiguous()  # (B, D, npoint)
+
+    def forward_with_dino(self, xyz, features=None, dino_feat=None):
+        """Forward pass threading dino_feat through the full encoder pipeline.
+
+        Args:
+            xyz:       (B, N, 3)
+            features:  (B, C, N) or None
+            dino_feat: (B, D, N) or None
+
+        Returns:
+            npoint is None:
+                (point, dino_dense)
+                  point:      encoded Point at encoder/decoder resolution
+                  dino_dense: (B, N_enc, D) aligned with point2dense, or None
+            npoint is set:
+                (out_xyz, out_features, fps_inds, dino_fps)
+                  out_xyz:      (B, npoint, 3)
+                  out_features: (B, C, npoint)
+                  fps_inds:     (B, npoint)
+                  dino_fps:     (B, D, npoint) or None
+        """
+        point = self._build_point(xyz, features)
+
+        if dino_feat is not None:
+            point["dino_feat"] = _flatten_dino(dino_feat)
+
+        point = self._forward_from_point(
+            point, after_sparsify=self._dino_after_sparsify
+        )
+
+        # ---- Extract pooled dino_feat ----
+        dino_out = point.get("dino_feat", None)  # (N_enc_total, D) or None
+
+        if self.npoint is None:
+            dense_xyz, _, _ = point2dense(point)
+            dino_dense = (
+                _scatter_to_dense(dino_out, point, dense_xyz.shape[1])
+                if dino_out is not None
+                else None
+            )
+            return point, dino_dense
+
+        # FPS path — shares fps_inds across xyz, features, and dino.
+        dense_xyz, dense_features, padding_mask = point2dense(point)
+
+        fps_xyz = dense_xyz.clone()
+        if padding_mask is not None:
+            fps_xyz[padding_mask] = 1e6
+
+        fps_inds = furthest_point_sample(fps_xyz, self.npoint).long()
+
+        if padding_mask is not None:
+            on_padded = torch.gather(padding_mask, 1, fps_inds)
+            if on_padded.any():
+                first_real = (~padding_mask).long().argmax(dim=1, keepdim=True)
+                fps_inds = torch.where(
+                    on_padded, first_real.expand_as(fps_inds), fps_inds
+                )
+
+        out_xyz = torch.gather(
+            dense_xyz,
+            1,
+            fps_inds.unsqueeze(-1).expand(-1, -1, 3),
+        )
+        out_features = torch.gather(
+            dense_features,
+            2,
+            fps_inds.unsqueeze(1).expand(-1, dense_features.shape[1], -1),
+        )
+        dino_fps = (
+            self._gather_dino_fps(dino_out, point, dense_xyz.shape[1], fps_inds)
+            if dino_out is not None
+            else None
+        )
+
+        return out_xyz, out_features, fps_inds, dino_fps
 
 
 @MODULES.register_module("PTv3PreEncoder")
@@ -75,6 +369,12 @@ class PTv3PreEncoder(PointTransformerV3):
                 features: (B, C, npoint) gathered features
                 inds:     (B, npoint) FPS indices
         """
+        # PTv3 was designed with feat = [xyz, rgb, ...] (matching its semseg
+        # pretraining). When dense features are provided, concat xyz so the
+        # embedding sees the full channel layout (in_channels = 3 + features.C).
+        # When features=None, dense2point falls back to feat = xyz.
+        if features is not None:
+            features = torch.cat([xyz.transpose(1, 2).contiguous(), features], dim=1)
         point = dense2point(xyz, features)
         point["grid_size"] = self.grid_size
 
@@ -106,15 +406,17 @@ class PTv3PreEncoder(PointTransformerV3):
             on_padded = torch.gather(padding_mask, 1, fps_inds)
             if on_padded.any():
                 first_real = (~padding_mask).long().argmax(dim=1, keepdim=True)
-                fps_inds = torch.where(on_padded, first_real.expand_as(fps_inds), fps_inds)
+                fps_inds = torch.where(
+                    on_padded, first_real.expand_as(fps_inds), fps_inds
+                )
 
         # Gather xyz: (B, npoint, 3)
-        out_xyz = torch.gather(
-            dense_xyz, 1, fps_inds.unsqueeze(-1).expand(-1, -1, 3)
-        )
+        out_xyz = torch.gather(dense_xyz, 1, fps_inds.unsqueeze(-1).expand(-1, -1, 3))
         # Gather features: (B, C, npoint) from (B, C, max_n)
         out_features = torch.gather(
-            dense_features, 2, fps_inds.unsqueeze(1).expand(-1, dense_features.shape[1], -1)
+            dense_features,
+            2,
+            fps_inds.unsqueeze(1).expand(-1, dense_features.shape[1], -1),
         )
 
         return out_xyz, out_features, fps_inds
@@ -151,6 +453,10 @@ class PTv3UNetPreEncoder(PointTransformerV3):
         Returns:
             Point with decoded features at initial voxel resolution.
         """
+        # See PTv3PreEncoder.forward: prepend xyz to feat to match PTv3's
+        # [xyz, rgb, ...] embedding convention when features are provided.
+        if features is not None:
+            features = torch.cat([xyz.transpose(1, 2).contiguous(), features], dim=1)
         point = dense2point(xyz, features)
         point["grid_size"] = self.grid_size
 
@@ -373,11 +679,7 @@ class PTv3m3PreEncoder(PointTransformerV3m3):
         # That's intentional — the decoder is trained from scratch — so drop
         # them from the missing list and log at INFO instead of raising.
         dec_missing = []
-        if (
-            self._ckpt_enc_mode is True
-            and not self.enc_mode
-            and hasattr(self, "dec")
-        ):
+        if self._ckpt_enc_mode is True and not self.enc_mode and hasattr(self, "dec"):
             dec_missing = [k for k in missing if k.startswith("dec.")]
             missing = [k for k in missing if not k.startswith("dec.")]
             if dec_missing:
@@ -566,9 +868,7 @@ class PTv3m3PreEncoder(PointTransformerV3m3):
             # fresh graph for the trainable dec.
             self._bridge_leaf(point)
         else:  # "none"
-            point.serialization(
-                order=self.order, shuffle_orders=self.shuffle_orders
-            )
+            point.serialization(order=self.order, shuffle_orders=self.shuffle_orders)
             point.sparsify()
             point = self.embedding(point)
             point = self.enc(point)
@@ -635,9 +935,7 @@ class PTv3m3PreEncoder(PointTransformerV3m3):
             if not self.enc_mode:
                 self._bridge_leaf(point)
         else:  # "none"
-            point.serialization(
-                order=self.order, shuffle_orders=self.shuffle_orders
-            )
+            point.serialization(order=self.order, shuffle_orders=self.shuffle_orders)
             point.sparsify()
             point = self.embedding(point)
             point = self.enc(point)
@@ -679,9 +977,7 @@ class PTv3m3PreEncoder(PointTransformerV3m3):
                     on_padded, first_real.expand_as(fps_inds), fps_inds
                 )
 
-        out_xyz = torch.gather(
-            dense_xyz, 1, fps_inds.unsqueeze(-1).expand(-1, -1, 3)
-        )
+        out_xyz = torch.gather(dense_xyz, 1, fps_inds.unsqueeze(-1).expand(-1, -1, 3))
         out_features = torch.gather(
             dense_features,
             2,
@@ -689,3 +985,167 @@ class PTv3m3PreEncoder(PointTransformerV3m3):
         )
 
         return out_xyz, out_features, fps_inds
+
+
+@MODELS.register_module("PTv3PreEncoderWithDino")
+@MODULES.register_module("PTv3PreEncoderWithDino")
+class PTv3PreEncoderWithDino(PTv3DinoMixin, PTv3PreEncoder):
+    """PTv3PreEncoder that threads pooled DINO features through the encoder."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._register_pooling_hooks()
+
+    def _build_point(self, xyz, features):
+        if features is not None:
+            features = torch.cat([xyz.transpose(1, 2).contiguous(), features], dim=1)
+        point = dense2point(xyz, features)
+        point["grid_size"] = self.grid_size
+        point.serialization(order=self.order, shuffle_orders=self.shuffle_orders)
+        return point
+
+    def _forward_from_point(self, point, after_sparsify=None):
+        point.sparsify()
+        if after_sparsify is not None:
+            after_sparsify(point)
+        point = self.embedding(point)
+        point = self.enc(point)
+        return point
+
+
+@MODULES.register_module("PTv3m3PreEncoderWithDino")
+class PTv3m3PreEncoderWithDino(PTv3DinoMixin, PTv3m3PreEncoder):
+    """PTv3m3PreEncoder (Utonia) that threads pooled DINO features.
+
+    All freeze_backbone semantics preserved from PTv3m3PreEncoder.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._register_pooling_hooks()
+
+    def _build_point(self, xyz, features):
+        feat_padded = self._build_padded_feat(xyz, features)
+        point = dense2point(xyz, feat_padded)
+        point["grid_size"] = self.grid_size
+        point.serialization(order=self.order, shuffle_orders=self.shuffle_orders)
+        return point
+
+    def _forward_from_point(self, point, after_sparsify=None):
+        if self.freeze_backbone == "enc_finetune":
+            with torch.no_grad():
+                point.sparsify()
+                if after_sparsify is not None:
+                    after_sparsify(point)
+                point = self.embedding(point)
+                for _, stage in list(self.enc.named_children())[:-1]:
+                    point = stage(point)
+            self._bridge_leaf(point)
+            point = self.enc[-1](point)
+
+        elif self.freeze_backbone == "enc":
+            with torch.no_grad():
+                point.sparsify()
+                if after_sparsify is not None:
+                    after_sparsify(point)
+                point = self.embedding(point)
+                point = self.enc(point)
+            if not self.enc_mode:
+                self._bridge_leaf(point)
+
+        else:  # "none"
+            point.sparsify()
+            if after_sparsify is not None:
+                after_sparsify(point)
+            point = self.embedding(point)
+            point = self.enc(point)
+
+        if not self.enc_mode:
+            if self.freeze_backbone in ("enc", "enc_finetune"):
+                self._clear_subm_pair_cache(point)
+            point = self.dec(point)
+
+        if self.freeze_backbone == "enc" and self.enc_mode:
+            self._bridge_leaf(point)
+
+        return point
+
+
+# ---------------------------------------------------------------------------
+# "True FPS" DINO variants: gather DINO at the single nearest raw input
+# point of each FPS-selected center via torch_cluster.knn(k=1). No DINO
+# threading through the encoder — the base pre-encoder runs unchanged.
+# ---------------------------------------------------------------------------
+
+
+def _dino_true_fps_gather(enc_xyz, raw_xyz, dino_feat):
+    """For each enc center, find nearest raw point and gather its DINO.
+
+    Args:
+        enc_xyz:   (B, M, 3) — FPS-selected center points
+        raw_xyz:   (B, N, 3) — raw input points (same order as ``dino_feat``)
+        dino_feat: (B, N, D) — per-raw-point DINO features
+
+    Returns:
+        (B, D, M) — DINO of the nearest raw point of each enc center.
+    """
+    B, M, _ = enc_xyz.shape
+    N, D = raw_xyz.shape[1], dino_feat.shape[-1]
+    device = enc_xyz.device
+
+    flat_src = raw_xyz.reshape(B * N, 3).contiguous()
+    flat_query = enc_xyz.reshape(B * M, 3).contiguous()
+    batch_s = torch.arange(B, device=device).repeat_interleave(N)
+    batch_q = torch.arange(B, device=device).repeat_interleave(M)
+
+    # torch_cluster.knn returns (2, B*M*k); row 1 holds src indices into flat_src.
+    nn_idx = torch_cluster.knn(
+        x=flat_src,
+        y=flat_query,
+        batch_x=batch_s,
+        batch_y=batch_q,
+        k=1,
+    )[1]
+
+    gathered = dino_feat.reshape(B * N, D)[nn_idx]  # (B*M, D)
+    return gathered.reshape(B, M, D).permute(0, 2, 1).contiguous()  # (B, D, M)
+
+
+@MODULES.register_module("PTv3PreEncoderWithDinoTrueFps")
+class PTv3PreEncoderWithDinoTrueFps(PTv3PreEncoder):
+    """PTv3PreEncoder + post-FPS nearest-raw-point DINO gather.
+
+    Runs the base PTv3 pre-encoder unchanged; then for each of the
+    ``npoint`` FPS-selected centers, gathers the DINO of the single nearest
+    raw input point via ``torch_cluster.knn(k=1)``. No DINO threading
+    inside the encoder.
+    """
+
+    def forward_with_dino(self, xyz, features=None, dino_feat=None):
+        assert (
+            self.npoint is not None
+        ), "PTv3PreEncoderWithDinoTrueFps requires npoint (FPS path)"
+        out_xyz, out_features, fps_inds = self.forward(xyz, features)
+        if dino_feat is None:
+            return out_xyz, out_features, fps_inds, None
+        dino_fps = _dino_true_fps_gather(out_xyz, xyz, dino_feat)
+        return out_xyz, out_features, fps_inds, dino_fps
+
+
+@MODULES.register_module("PTv3m3PreEncoderWithDinoTrueFps")
+class PTv3m3PreEncoderWithDinoTrueFps(PTv3m3PreEncoder):
+    """PTv3m3PreEncoder (Utonia) + post-FPS nearest-raw-point DINO gather.
+
+    ``freeze_backbone`` semantics are inherited unchanged from
+    ``PTv3m3PreEncoder`` since ``forward()`` is called as-is.
+    """
+
+    def forward_with_dino(self, xyz, features=None, dino_feat=None):
+        assert (
+            self.npoint is not None
+        ), "PTv3m3PreEncoderWithDinoTrueFps requires npoint (FPS path)"
+        out_xyz, out_features, fps_inds = self.forward(xyz, features)
+        if dino_feat is None:
+            return out_xyz, out_features, fps_inds, None
+        dino_fps = _dino_true_fps_gather(out_xyz, xyz, dino_feat)
+        return out_xyz, out_features, fps_inds, dino_fps

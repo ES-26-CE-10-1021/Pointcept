@@ -1,5 +1,7 @@
 # Thesis Experiments
 
+> **Superseded by [`thesis-experiment-context.md`](thesis-experiment-context.md) as of 2026-05-19.** That file holds the final frozen experiment matrix (RQ1 expanded to 5 backbone slots, RQ2 color ablation, RQ3 task-axis sweep on AGCO). The content below is pre-freeze history — kept for reference but no longer the authoritative experiment list.
+
 This note tracks the experiments selected to produce results for the thesis.
 Configs live in `configs/<dataset>/...` and are launched via
 `scripts/train.sh -d <dataset> -c <config> -n <exp_name> -g <num_gpus>`.

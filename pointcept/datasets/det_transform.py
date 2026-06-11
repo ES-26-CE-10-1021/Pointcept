@@ -31,7 +31,7 @@ from .transform import TRANSFORMS
 # must index in lockstep with ``point_cloud``. Add new keys here as the
 # dataset starts emitting more per-point arrays (normals, intensity arrays
 # stored separately, etc.).
-_PER_POINT_KEYS = ("point_cloud", "segment", "pcl_color")
+_PER_POINT_KEYS = ("point_cloud", "segment", "pcl_color", "dino_feat")
 
 
 def _wrap_pi(angle):

@@ -166,7 +166,7 @@ def camera_to_lidar_np(points):
     return out
 
 
-def build_geometries_for_sample(sample, color_pts=False):
+def build_geometries_for_sample(sample, color_pts=False, use_rgb=False):
     """Generate Open3D geometries from a dataset sample without triggering rendering."""
     colors = CLASS_COLORS
 
@@ -180,8 +180,10 @@ def build_geometries_for_sample(sample, color_pts=False):
     pcd = o3d.geometry.PointCloud()
     pcd.points = o3d.utility.Vector3dVector(pts[:, :3])
 
-    # Initialize point colors: grayscale from intensity or default
-    if pts.shape[1] == 4:
+    # Initialize point colors: RGB (xyz+rgb layout) > grayscale intensity > default gray.
+    if use_rgb and pts.shape[1] >= 6:
+        point_colors = np.clip(pts[:, 3:6], 0.0, 1.0)
+    elif pts.shape[1] == 4:
         intensity = pts[:, 3]
         intensity = (intensity - intensity.min()) / (intensity.max() - intensity.min() + 1e-6)
         point_colors = np.column_stack([intensity, intensity, intensity])
@@ -323,12 +325,13 @@ class PredictionDataset:
 
 class DatasetViewer:
     def __init__(self, dataset, start_idx=0, max_samples=None, color_pts=False,
-                 geometry_builder=None):
+                 use_rgb=False, geometry_builder=None):
         self.dataset = dataset
         self.current_idx = start_idx
         self.max_idx = min(start_idx + max_samples, len(dataset)) if max_samples else len(dataset)
         self.active_geometries = []
         self.color_pts = color_pts
+        self.use_rgb = use_rgb
         self.geometry_builder = geometry_builder or build_geometries_for_sample
 
         # --- PLAYBACK SETTINGS ---
@@ -425,7 +428,9 @@ class DatasetViewer:
                         f"apply_r_level_to_boxes={cfg_diag.get('apply_r_level_to_boxes')}"
                     )
             else:
-                new_geometries = self.geometry_builder(sample, color_pts=self.color_pts)
+                new_geometries = self.geometry_builder(
+                    sample, color_pts=self.color_pts, use_rgb=self.use_rgb
+                )
                 num_boxes = int(np.sum(sample["gt_box_present"]))
                 pts_shape = sample["point_clouds"].shape
                 print(f"OK ({pts_shape[0]} pts, {num_boxes} boxes)")
@@ -602,6 +607,8 @@ def main():
     parser.add_argument("--apply-gravity-boxes", action="store_true")
     parser.add_argument("--apply-gravity-pts", action="store_true")
     parser.add_argument("--color-pts", action="store_true", help="Color points inside bounding boxes")
+    parser.add_argument("--color", action="store_true",
+                        help="Load per-point RGB from <sensor>/color/<ts>.npy and use it as the point color")
 
     args = parser.parse_args()
 
@@ -673,6 +680,7 @@ def main():
             sensors=tuple(args.sensors),
             num_points=args.num_points,
             use_intensity=args.use_intensity,
+            use_color=args.color,
             transform=transform,
             min_inliers=args.min_inliers,
             apply_t_rtk=args.apply_t_rtk,
@@ -711,7 +719,8 @@ def main():
         dataset=dataset,
         start_idx=args.start_idx,
         max_samples=viewer_max_samples,
-        color_pts=args.color_pts
+        color_pts=args.color_pts,
+        use_rgb=args.color,
     )
     viewer.run()
 

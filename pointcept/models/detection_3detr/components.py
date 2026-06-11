@@ -104,6 +104,33 @@ class PointnetSAPreEncoder(nn.Module):
         return self.sa_module(xyz, features)
 
 
+@MODULES.register_module("PointnetSAPreEncoderWithDino")
+class PointnetSAPreEncoderWithDino(PointnetSAPreEncoder):
+    """PointnetSAPreEncoder that also gathers DINO features at FPS centers.
+
+    Geometric features still come from ball-query aggregation (untouched).
+    DINO features are gathered at the SA layer's FPS-selected input indices —
+    one DINO vector per output point, no neighborhood pooling — and returned
+    alongside so ``Model3DETRDetectorWithDino`` can inject them at the
+    encoder slot via ``DinoInjectionEncoder``.
+    """
+
+    def __init__(self, npoint=2048, **kwargs):
+        super().__init__(npoint=npoint, **kwargs)
+        # Exposed so Model3DETRDetectorWithDino.forward dispatches the FPS path.
+        self.npoint = npoint
+
+    def forward_with_dino(self, xyz, features=None, dino_feat=None):
+        out_xyz, out_features, fps_inds = self.sa_module(xyz, features)
+        if dino_feat is None:
+            return out_xyz, out_features, fps_inds, None
+        # dino_feat: (B, N, D); fps_inds: (B, npoint) into N.
+        idx = fps_inds.long().unsqueeze(-1).expand(-1, -1, dino_feat.shape[-1])
+        dino_fps = torch.gather(dino_feat, 1, idx)  # (B, npoint, D)
+        dino_fps = dino_fps.permute(0, 2, 1).contiguous()  # (B, D, npoint)
+        return out_xyz, out_features, fps_inds, dino_fps
+
+
 @MODULES.register_module()
 class VanillaTransformerEncoder3DETR(nn.Module):
     """
@@ -194,9 +221,7 @@ class MaskedTransformerEncoder3DETR(nn.Module):
     ):
         super().__init__()
         if masking_radius is None:
-            masking_radius = [
-                math.pow(x, 2) for x in [0.4, 0.8, 1.2]
-            ]
+            masking_radius = [math.pow(x, 2) for x in [0.4, 0.8, 1.2]]
 
         encoder_layer = TransformerEncoderLayer(
             d_model=encoder_dim,

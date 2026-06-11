@@ -139,10 +139,13 @@ class Dense3DETRSegmentor(nn.Module):
 
         if self.training:
             assert has_segment, "Training forward requires `segment` in input_dict."
+            # Only return scalars here: InformationWriter.after_step calls
+            # .item() on every value in the model output dict, so non-scalar
+            # tensors (e.g. seg_logits) would crash it. Eval mode below still
+            # returns seg_logits for the evaluator.
             return dict(
                 loss=loss,
                 loss_seg=loss.detach(),
-                seg_logits=seg_logits,
             )
 
         # Eval: SemSegEvaluator (evaluator.py:140) reads both `loss` and
