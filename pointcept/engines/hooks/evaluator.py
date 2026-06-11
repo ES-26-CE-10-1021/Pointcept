@@ -910,7 +910,18 @@ class ObjDetEvaluator(HookBase):
     Config must set:
         num_semcls (int): number of detection classes (default 18)
         class_names (list[str]): ordered class name list
+
+    Args:
+        compute_loss (bool): If True (default, backward-compatible), runs the
+            model twice per val batch — once with ``training=True`` to compute
+            the validation loss and once with ``training=False`` to obtain
+            outputs for AP. If False, runs only the eval forward and reports
+            ``val/loss`` as NaN. Set False to reduce peak val memory for
+            configs with heavy per-sample inputs (e.g. DINO features).
     """
+
+    def __init__(self, compute_loss=True):
+        self.compute_loss = compute_loss
 
     def after_epoch(self):
         if self.trainer.cfg.evaluate:
@@ -968,14 +979,15 @@ class ObjDetEvaluator(HookBase):
                     input_dict[key] = input_dict[key].cuda(non_blocking=True)
 
             with torch.no_grad():
-                inner_model.training = True
-                loss_out = self.trainer.model(input_dict)
-                inner_model.training = False
+                if self.compute_loss:
+                    inner_model.training = True
+                    loss_out = self.trainer.model(input_dict)
+                    inner_model.training = False
+                    if "loss" in loss_out:
+                        total_loss += loss_out["loss"].item()
+                        num_batches += 1
+                    del loss_out
                 output_dict = self.trainer.model(input_dict)
-
-            if "loss" in loss_out:
-                total_loss += loss_out["loss"].item()
-                num_batches += 1
 
             ap_calculator.step_meter(output_dict, input_dict)
 
@@ -986,7 +998,7 @@ class ObjDetEvaluator(HookBase):
                     )
                 )
 
-        loss_avg = total_loss / max(num_batches, 1)
+        loss_avg = total_loss / num_batches if num_batches > 0 else float("nan")
 
         comm.synchronize()
         all_pred = comm.gather(ap_calculator.pred_map_cls, dst=0)
