@@ -28,3 +28,6 @@ from .point_prompt_training import *
 from .sonata import *
 from .concerto import *
 from .utonia import *
+
+# 3D Object Detection
+from .detection_3detr import *

@@ -1,0 +1,15 @@
+[submodule "third_party/3detr"]
+	path = third_party/3detr
+	url = git@github.com:ES-26-CE-10-1021/3detr.git
+	branch = dev
+[submodule "third_party/slurm_scripts"]
+	path = third_party/slurm_scripts
+	url = git@github.com:ES-26-CE-10-1021/slurm_scripts.git
+  branch = main
+[submodule "third_party/utonia"]
+	path = third_party/utonia
+	url = git@github.com:ES-26-CE-10-1021/Utonia.git
+[submodule "third_party/LitePT"]
+	path = third_party/LitePT
+	url = git@github.com:ES-26-CE-10-1021/LitePT.git
+	branch = dev
